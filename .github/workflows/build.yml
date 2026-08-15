@@ -28,7 +28,7 @@ jobs:
           arduino-cli compile \
             --fqbn esp32:esp32:esp32s3 \
             --output-dir build \
-            firmware.ino
+            .
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4

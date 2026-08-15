@@ -2,6 +2,9 @@ name: Build ESP32-S3 Firmware
 
 on:
   push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -9,32 +12,69 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ── 1. Checkout ─────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Arduino CLI
-        uses: arduino/setup-arduino-cli@v2
+      # ── 2. Install arduino-cli ───────────────────────────────────────────────
+      - name: Install arduino-cli
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+          echo "$HOME/bin" >> $GITHUB_PATH
 
-      - name: Install ESP32 Arduino Core
+      # ── 3. Add ESP32 board index ─────────────────────────────────────────────
+      - name: Configure board manager
         run: |
           arduino-cli config init
-          arduino-cli core update-index \
-            --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
-          arduino-cli core install esp32:esp32 \
-            --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli config add board_manager.additional_urls \
+            https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
-      - name: Compile ESP32-S3
+      # ── 4. Install ESP32 Arduino core ────────────────────────────────────────
+      - name: Install ESP32 core
         run: |
-          mkdir ArsWebUI
-          cp ArsWebUI.ino ArsWebUI/ArsWebUI.ino
-          cp web_content.h ArsWebUI/web_content.h
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@3.3.5
+
+      # ── 5. Install 3rd-party libraries ───────────────────────────────────────
+      # AsyncTCP and ESPAsyncWebServer are installed from GitHub because the
+      # Library Manager versions lag behind the ESP32 Arduino 3.x API changes.
+      - name: Install libraries
+        run: |
+          LIBDIR="$HOME/Arduino/libraries"
+          mkdir -p "$LIBDIR"
+
+          # AsyncTCP (ESP32Async fork — supports ESP32 Arduino core 3.x)
+          git clone --depth 1 https://github.com/ESP32Async/AsyncTCP.git \
+            "$LIBDIR/AsyncTCP"
+
+          # ESPAsyncWebServer (ESP32Async fork)
+          git clone --depth 1 https://github.com/ESP32Async/ESPAsyncWebServer.git \
+            "$LIBDIR/ESPAsyncWebServer"
+
+          # Adafruit NeoPixel — available in Library Manager
+          arduino-cli lib install "Adafruit NeoPixel"
+
+      # ── 6. Set up sketch folder ──────────────────────────────────────────────
+      # Arduino CLI requires the sketch .ino to live inside a folder with the
+      # same name as the file.  Copy BOTH .ino and .h into that folder.
+      - name: Prepare sketch folder
+        run: |
+          mkdir -p ArsWebUI
+          cp ArsWebUI.ino  ArsWebUI/
+          cp web_content.h ArsWebUI/
+
+      # ── 7. Compile ───────────────────────────────────────────────────────────
+      - name: Compile sketch
+        run: |
           arduino-cli compile \
-            --fqbn esp32:esp32:esp32s3 \
-            --output-dir build \
+            --fqbn "esp32:esp32:esp32s3:EraseFlash=none,PartitionScheme=huge_app,ZigbeeMode=default,LoopCore=1,CDCOnBoot=default,DFUOnBoot=default,JTAGAdapter=default,CPUFreq=240,PSRAM=opi,UploadMode=default,EventsCore=1,MSCOnBoot=default,USBMode=hwcdc,FlashMode=qio,FlashSize=16M,DebugLevel=none,UploadSpeed=921600" \
+            --output-dir firmware \
             ArsWebUI
 
-      - name: Upload firmware
+      # ── 8. Upload compiled .bin as artifact ──────────────────────────────────
+      - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
           name: esp32s3-firmware
-          path: build/
+          path: firmware/*.bin
+          retention-days: 30

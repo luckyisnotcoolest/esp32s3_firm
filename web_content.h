@@ -174,7 +174,7 @@ tr:hover td{background:#141925}
 <div class="card">
   <div class="card-h"><span class="dot"></span>Network Scanner</div>
   <div class="ctrls">
-    <button class="btn btn-blue" onclick="scanWiFi()">SCAN NETWORKS</button>
+    <button class="btn btn-blue" onclick="scanWiFi()" title="Stop any active attack before scanning">SCAN NETWORKS</button>
     <button class="btn btn-blue" onclick="scanClients()">PASSIVE CLIENTS</button>
   </div>
   <div id="scanArea"><div class="loading">Tap SCAN to discover networks</div></div>
@@ -257,9 +257,13 @@ tr:hover td{background:#141925}
     </div>
   </div>
 
+  <div class="info" style="margin-bottom:10px">
+    <b>DEAUTH TARGET</b> — single AP on its channel (AP_CHANNEL constraint applies).<br>
+    <b>DEAUTH ALL CH1-13</b> — sweeps every channel, bursts all found APs + broadcast deauth. Uses PSRAM AP map, no heap fragmentation.
+  </div>
   <div class="ctrls">
     <button class="btn btn-red"  onclick="startDeauth()">DEAUTH TARGET</button>
-    <button class="btn btn-red"  onclick="startDeauthAll()">DEAUTH ALL</button>
+    <button class="btn btn-red"  onclick="startDeauthAll()" title="Sweeps ch1-13, deauths all APs on every channel">DEAUTH ALL CH1-13</button>
     <button class="btn btn-pur"  onclick="startCSA()">CSA ATTACK</button>
     <button class="btn btn-stop" onclick="stopAll()">■ STOP ALL</button>
   </div>
@@ -271,6 +275,7 @@ tr:hover td{background:#141925}
   <div class="info">
     Floods the air with 20 fake SSIDs on rotating channels.
     Saturates nearby device scanner lists with ghost networks.
+    Uses PSRAM buffer for zero heap impact during attack.
   </div>
   <div class="ctrls">
     <button class="btn btn-pur"  onclick="startBeacon()">START BEACON SPAM</button>

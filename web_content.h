@@ -4,22 +4,7 @@
 // ArsWebUI v2.8 — Dark UI
 // Endpoints: /scan /scan_clients /deauth /deauth_all /csa /beacon_spam
 //   /stop /stopdeauth /udp_flood /savesta /setap /pkt_count /attack_status
-//   /log /sysinfo /set
-//
-// v2.8 changes:
-//   + fetchT() — all fetch() calls wrapped with 8s AbortController timeout.
-//     Previously at HIGH/MAX intensity the ESP was slow to respond and JS
-//     fetch() would hang indefinitely, making buttons appear frozen/dead.
-//     Now every request times out after 8s and re-enables the button.
-//   + btnGuard() — disables the clicked button with visual feedback during
-//     the request, re-enables after resolve/reject. Prevents double-fire
-//     and the "button won't respond" feel during sustained TX load.
-//   + IPEX→SMA antenna tip banner added to header (dismissible, persists
-//     only for session). Prominent recommendation for external antenna use.
-//   + Status poll interval 2500ms → 3500ms — reduces HTTP load on ESP
-//     during active attack, fewer competing requests on core 0.
-//   + Sysinfo poll interval 6000ms → 8000ms — same reason.
-//   + Fetch error messages more specific (timeout vs network error).
+//   /log /sysinfo /set /ota_info /setotapass
 
 const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
@@ -40,40 +25,40 @@ body{background:var(--bg);color:var(--text);
      font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh}
 .wrap{max-width:900px;margin:0 auto;padding:12px}
 
+/* ── Antenna banner ── */
+.ant-banner{
+  background:linear-gradient(135deg,#0a1628,#1a0a28);
+  border:1px solid #3b82f6;border-radius:10px;
+  padding:10px 14px;margin-bottom:10px;font-size:11px;
+  color:#93c5fd;display:flex;align-items:flex-start;
+  justify-content:space-between;gap:10px;line-height:1.7}
+.ant-banner strong{color:#60a5fa;font-size:12px;display:block;margin-bottom:2px}
+.ant-banner .ant-x{
+  background:none;border:1px solid #2a3a5a;border-radius:5px;
+  color:#4b5675;cursor:pointer;font-size:12px;padding:1px 7px;
+  flex-shrink:0;margin-top:2px;transition:all .15s}
+.ant-banner .ant-x:hover{border-color:#60a5fa;color:#93c5fd}
+
 /* ── Header ── */
 .hdr{background:linear-gradient(135deg,#080b14,#141033);
      border:1px solid #1e1b4b;border-radius:14px;
-     padding:20px 18px;margin-bottom:12px;text-align:center}
+     padding:18px 18px 14px;margin-bottom:10px;text-align:center}
 .hdr h1{font-size:21px;font-weight:900;letter-spacing:3px;
         background:linear-gradient(90deg,#60a5fa,#c084fc);
         -webkit-background-clip:text;-webkit-text-fill-color:transparent}
 .hdr-sub{color:var(--muted);font-size:10px;letter-spacing:2px;margin-top:3px}
 .live-row{display:flex;justify-content:center;gap:22px;
-          margin-top:10px;font-size:11px;font-weight:700;letter-spacing:1px}
+          margin-top:9px;font-size:11px;font-weight:700;letter-spacing:1px;
+          flex-wrap:wrap}
 .live-row span{color:var(--muted)}
 .live-row b{color:#60a5fa}
 #liveStatus{color:#a855f7}
-
-/* ── IPEX/SMA Antenna Tip Banner ── */
-.ant-tip{background:linear-gradient(135deg,#071a0f,#0a2318);
-         border:1px solid #16a34a;border-radius:10px;
-         padding:12px 15px;margin-bottom:10px;
-         display:flex;align-items:flex-start;gap:12px;position:relative}
-.ant-tip-icon{font-size:22px;flex-shrink:0;line-height:1}
-.ant-tip-body{flex:1}
-.ant-tip-title{font-size:11px;font-weight:800;letter-spacing:1.5px;
-               color:#4ade80;text-transform:uppercase;margin-bottom:5px}
-.ant-tip-text{font-size:10px;color:#86efac;line-height:1.65}
-.ant-tip-text b{color:#4ade80}
-.ant-tip-close{position:absolute;top:9px;right:11px;background:none;
-               border:none;color:#4ade80;cursor:pointer;font-size:14px;
-               opacity:.6;line-height:1}
-.ant-tip-close:hover{opacity:1}
-.ant-chain{display:flex;align-items:center;gap:6px;margin-top:7px;
-           flex-wrap:wrap;font-size:10px;font-weight:700}
-.ant-node{background:#0f2d1a;border:1px solid #16a34a;border-radius:5px;
-          padding:3px 9px;color:#4ade80;white-space:nowrap}
-.ant-arrow{color:#4ade80;opacity:.7}
+.net-row{display:flex;justify-content:center;gap:16px;
+         margin-top:5px;font-size:10px;letter-spacing:.8px;
+         flex-wrap:wrap}
+.net-row span{color:var(--muted)}
+.net-row b{color:#34d399}
+.net-row .ota-b{color:#f59e0b}
 
 /* ── Cards ── */
 .card{background:var(--card);border:1px solid var(--border);
@@ -86,31 +71,35 @@ body{background:var(--bg);color:var(--text);
 .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0}
 .dot.r{background:var(--red)}.dot.y{background:var(--yellow)}
 .dot.p{background:var(--purple)}.dot.g{background:var(--green)}
+.dot.o{background:#f59e0b}
 
 /* ── Buttons ── */
 .btn{padding:8px 15px;border:none;border-radius:7px;cursor:pointer;
      font-size:11px;font-weight:700;letter-spacing:.4px;
      font-family:inherit;transition:all .13s}
 .btn:active{transform:scale(.96)}
-.btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
 .btn-blue{background:#1d4ed8;color:#fff}
-.btn-blue:hover:not(:disabled){background:#1e40af}
+.btn-blue:hover{background:#1e40af}
 .btn-red{background:#b91c1c;color:#fff}
-.btn-red:hover:not(:disabled){background:#991b1b}
+.btn-red:hover{background:#991b1b}
 .btn-yel{background:#b45309;color:#fff}
-.btn-yel:hover:not(:disabled){background:#92400e}
+.btn-yel:hover{background:#92400e}
 .btn-pur{background:#7c3aed;color:#fff}
-.btn-pur:hover:not(:disabled){background:#6d28d9}
+.btn-pur:hover{background:#6d28d9}
 .btn-stop{background:#2d0808;color:#fca5a5;border:1px solid #7f1d1d}
-.btn-stop:hover:not(:disabled){background:#7f1d1d}
+.btn-stop:hover{background:#7f1d1d}
 .btn-grey{background:#151b28;color:#94a3b8;border:1px solid var(--border)}
-.btn-grey:hover:not(:disabled){background:#1e2742}
+.btn-grey:hover{background:#1e2742}
 .btn-sel{padding:4px 9px;background:#1d4ed8;color:#fff;border:none;
          border-radius:5px;cursor:pointer;font-size:10px;font-weight:700}
 .btn-sel:hover{background:#1e40af}
 .btn-csa{padding:4px 9px;background:#6d28d9;color:#fff;border:none;
          border-radius:5px;cursor:pointer;font-size:10px;font-weight:700}
 .btn-csa:hover{background:#5b21b6}
+.btn-auto{padding:4px 9px;border:1px solid var(--border);background:#0d1321;
+          color:var(--muted);border-radius:5px;cursor:pointer;
+          font-size:10px;font-weight:700;transition:all .15s}
+.btn-auto.on{background:#0a2010;border-color:#22c55e;color:#4ade80}
 
 /* ── Badge ── */
 .badge{display:inline-block;padding:3px 11px;border-radius:20px;
@@ -163,7 +152,14 @@ tr:hover td{background:#141925}
       border-radius:8px;padding:11px}
 .stat-l{color:var(--muted);font-size:8px;letter-spacing:1.5px;
         text-transform:uppercase;font-weight:700;margin-bottom:4px}
-.stat-v{color:#60a5fa;font-weight:800;font-size:15px}
+.stat-v{color:#60a5fa;font-weight:800;font-size:14px;word-break:break-all}
+
+/* ── OTA block ── */
+.ota-block{background:#070b10;border:1px solid #1a2a18;
+           border-radius:8px;padding:12px;margin-bottom:10px}
+.ota-block .ota-ip{font-family:monospace;font-size:13px;
+                   color:#34d399;font-weight:800;letter-spacing:.5px}
+.ota-block .ota-sub{font-size:10px;color:var(--muted);margin-top:4px;line-height:1.7}
 
 /* ── Misc ── */
 .ctrls{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
@@ -187,44 +183,32 @@ tr:hover td{background:#141925}
 .hint{font-size:9px;color:var(--muted);margin-top:-7px;margin-bottom:10px}
 .foot{text-align:center;padding:12px;color:#1e2742;font-size:9px;
       letter-spacing:2px;margin-top:6px}
+.scan-hdr{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.scan-auto-lbl{font-size:9px;color:var(--muted);font-weight:700;
+               letter-spacing:1px;text-transform:uppercase}
 @media(max-width:560px){
   .row2,.inten-row{grid-template-columns:1fr 1fr}
   .stats{grid-template-columns:1fr 1fr}
-  .ant-chain{gap:4px}
 }
 </style>
 </head>
 <body>
 <div class="wrap">
 
-<!-- IPEX/SMA ANTENNA TIP BANNER -->
-<div class="ant-tip" id="antTip">
-  <div class="ant-tip-icon">📡</div>
-  <div class="ant-tip-body">
-    <div class="ant-tip-title">📶 Increase Deauth Range — External Antenna Recommended</div>
-    <div class="ant-tip-text">
-      The ESP32-S3 PCB antenna (~2 dBi) severely limits effective deauth range (~5–15m).
-      Adding an <b>IPEX/U.FL → SMA adapter + 5 dBi 2.4GHz antenna</b> extends range to <b>50–100m+</b>
-      and dramatically improves packet delivery through walls. More signal = faster disconnections.
-    </div>
-    <div class="ant-chain">
-      <span class="ant-node">ESP32-S3 IPEX/U.FL</span>
-      <span class="ant-arrow">→</span>
-      <span class="ant-node">IPEX–SMA Pigtail</span>
-      <span class="ant-arrow">→</span>
-      <span class="ant-node">SMA Female Bulkhead</span>
-      <span class="ant-arrow">→</span>
-      <span class="ant-node">5 dBi 2.4GHz Omni</span>
-    </div>
-    <div style="margin-top:7px;font-size:9px;color:#4ade80;opacity:.7">
-      Search: "IPEX to SMA pigtail" + "2.4GHz 5dBi antenna" — ~$3 total.
-      Disable PCB antenna trace if module has a solder bridge (check module datasheet).
-    </div>
+<!-- ══ ANTENNA RECOMMENDATION BANNER (dismissable) ═══════════════════════════ -->
+<div class="ant-banner" id="antBanner">
+  <div>
+    <strong>📡 Range Tip — iPEX → SMA Adapter + High-Gain Antenna</strong>
+    For maximum deauth effectiveness: connect an <b>iPEX (u.FL) → SMA adapter</b>
+    to the ESP32-S3's antenna port and attach a <b>5–9 dBi high-gain omni antenna</b>
+    or a <b>14 dBi directional panel</b>. Works bare-S3 at 19.5 dBm — external antenna
+    dramatically extends range. Long-range model recommended:
+    <span style="color:#60a5fa">TP-Link TL-ANT2409CL</span> or similar 2.4 GHz SMA antenna.
   </div>
-  <button class="ant-tip-close" onclick="dismissTip()" title="Dismiss">✕</button>
+  <button class="ant-x" onclick="dismissBanner()">✕</button>
 </div>
 
-<!-- HEADER -->
+<!-- ══ HEADER ════════════════════════════════════════════════════════════════ -->
 <div class="hdr">
   <h1>ArsWebUI</h1>
   <div class="hdr-sub">ESP32-S3 N16R8 &nbsp;▸&nbsp; 19.5 dBm &nbsp;▸&nbsp; v2.8</div>
@@ -233,22 +217,38 @@ tr:hover td{background:#141925}
     <span>STATUS&nbsp;<b id="liveStatus">IDLE</b></span>
     <span>HEAP&nbsp;<b id="liveHeap">—</b></span>
   </div>
+  <div class="net-row">
+    <span>WEB&nbsp;<b id="liveWebIP">—</b></span>
+    <span>OTA&nbsp;<b class="ota-b" id="liveOtaIP">—</b></span>
+  </div>
 </div>
 
-<!-- SCANNER -->
+<!-- ══ SCANNER ═══════════════════════════════════════════════════════════════ -->
 <div class="card">
-  <div class="card-h"><span class="dot"></span>Network Scanner</div>
+  <div class="card-h">
+    <span class="dot"></span>
+    <div class="scan-hdr" style="flex:1">
+      <span>Network Scanner</span>
+      <span class="scan-auto-lbl" style="margin-left:auto">AUTO</span>
+      <button class="btn-auto" id="autoScanBtn" onclick="toggleAutoScan()">OFF</button>
+    </div>
+  </div>
   <div class="ctrls">
-    <button class="btn btn-blue" id="btnScan" onclick="scanWiFi(this)">SCAN NETWORKS</button>
-    <button class="btn btn-blue" id="btnScanCli" onclick="scanClients(this)">PASSIVE CLIENTS</button>
+    <button class="btn btn-blue" onclick="scanWiFi()">SCAN NETWORKS</button>
+    <button class="btn btn-blue" onclick="scanClients()">PASSIVE CLIENTS</button>
   </div>
   <div id="scanArea"><div class="loading">Tap SCAN to discover networks</div></div>
   <div id="clientArea" style="display:none;margin-top:12px">
-    <div class="loading">...</div>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <span style="font-size:9px;color:var(--muted);font-weight:700;
+                   letter-spacing:1px;text-transform:uppercase">PASSIVE AUTO-REFRESH</span>
+      <button class="btn-auto" id="autoClientBtn" onclick="toggleAutoClient()">OFF</button>
+    </div>
+    <div id="clientTable"><div class="loading">...</div></div>
   </div>
 </div>
 
-<!-- DEAUTH / CSA -->
+<!-- ══ DEAUTH / CSA ══════════════════════════════════════════════════════════ -->
 <div class="card">
   <div class="card-h"><span class="dot r"></span>Deauth &amp; CSA Attack</div>
 
@@ -323,14 +323,14 @@ tr:hover td{background:#141925}
   </div>
 
   <div class="ctrls">
-    <button class="btn btn-red"  id="btnDeauth"    onclick="startDeauth(this)">DEAUTH TARGET</button>
-    <button class="btn btn-red"  id="btnDeauthAll" onclick="startDeauthAll(this)">DEAUTH ALL</button>
-    <button class="btn btn-pur"  id="btnCSA"       onclick="startCSA(this)">CSA ATTACK</button>
-    <button class="btn btn-stop" id="btnStop"      onclick="stopAll(this)">■ STOP ALL</button>
+    <button class="btn btn-red"  onclick="startDeauth()">DEAUTH TARGET</button>
+    <button class="btn btn-red"  onclick="startDeauthAll()">DEAUTH ALL</button>
+    <button class="btn btn-pur"  onclick="startCSA()">CSA ATTACK</button>
+    <button class="btn btn-stop" onclick="stopAll()">■ STOP ALL</button>
   </div>
 </div>
 
-<!-- BEACON SPAM -->
+<!-- ══ BEACON SPAM ════════════════════════════════════════════════════════════ -->
 <div class="card">
   <div class="card-h"><span class="dot p"></span>Beacon Spam</div>
   <div class="info">
@@ -338,12 +338,12 @@ tr:hover td{background:#141925}
     Saturates nearby device scanner lists with ghost networks.
   </div>
   <div class="ctrls">
-    <button class="btn btn-pur"  id="btnBeacon" onclick="startBeacon(this)">START BEACON SPAM</button>
-    <button class="btn btn-stop" onclick="stopAll(this)">■ STOP</button>
+    <button class="btn btn-pur"  onclick="startBeacon()">START BEACON SPAM</button>
+    <button class="btn btn-stop" onclick="stopAll()">■ STOP</button>
   </div>
 </div>
 
-<!-- UDP FLOOD -->
+<!-- ══ UDP FLOOD ══════════════════════════════════════════════════════════════ -->
 <div class="card">
   <div class="card-h"><span class="dot y"></span>UDP Flood</div>
   <div class="row2">
@@ -358,12 +358,12 @@ tr:hover td{background:#141925}
   </div>
   <div class="info">Requires STA connection. Configure WiFi below first.</div>
   <div class="ctrls">
-    <button class="btn btn-yel"  id="btnUDP" onclick="startUDP(this)">START UDP FLOOD</button>
-    <button class="btn btn-stop" onclick="stopAll(this)">■ STOP</button>
+    <button class="btn btn-yel"  onclick="startUDP()">START UDP FLOOD</button>
+    <button class="btn btn-stop" onclick="stopAll()">■ STOP</button>
   </div>
 </div>
 
-<!-- WIFI STA CONFIG -->
+<!-- ══ WIFI STA CONFIG ════════════════════════════════════════════════════════ -->
 <div class="card">
   <div class="card-h"><span class="dot"></span>WiFi Config (STA)</div>
   <div class="row2">
@@ -377,12 +377,12 @@ tr:hover td{background:#141925}
     </div>
   </div>
   <div class="ctrls">
-    <button class="btn btn-blue" id="btnSTA" onclick="saveSTA(this)">SAVE &amp; CONNECT</button>
+    <button class="btn btn-blue" onclick="saveSTA()">SAVE &amp; CONNECT</button>
   </div>
-  <div class="hint" style="margin-top:8px">Required for UDP flood.</div>
+  <div class="hint" style="margin-top:8px">Required for UDP flood. OTA also works on STA IP when connected.</div>
 </div>
 
-<!-- AP CONFIG -->
+<!-- ══ AP CONFIG ══════════════════════════════════════════════════════════════ -->
 <div class="card">
   <div class="card-h"><span class="dot"></span>AP Config</div>
   <div class="row2">
@@ -396,18 +396,61 @@ tr:hover td{background:#141925}
     </div>
   </div>
   <div class="ctrls">
-    <button class="btn btn-blue" id="btnAP" onclick="saveAP(this)">APPLY &amp; REBROADCAST</button>
+    <button class="btn btn-blue" onclick="saveAP()">APPLY &amp; REBROADCAST</button>
   </div>
   <div class="hint" style="margin-top:7px">Reconnect with new credentials after apply.</div>
 </div>
 
-<!-- SYSTEM STATUS -->
+<!-- ══ OTA / NETWORK ══════════════════════════════════════════════════════════ -->
+<div class="card">
+  <div class="card-h"><span class="dot o"></span>OTA Update &amp; Network</div>
+
+  <div class="ota-block">
+    <div style="font-size:9px;color:var(--muted);font-weight:700;
+                letter-spacing:1.5px;text-transform:uppercase;margin-bottom:7px">
+      Network Addresses
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div>
+        <div style="font-size:8px;color:var(--muted);letter-spacing:1px;margin-bottom:3px">
+          WEB UI (AP)
+        </div>
+        <div class="ota-ip" id="otaWebAddr">—</div>
+      </div>
+      <div>
+        <div style="font-size:8px;color:#b45309;letter-spacing:1px;margin-bottom:3px">
+          OTA FLASH PORT
+        </div>
+        <div class="ota-ip" style="color:#f59e0b" id="otaFlashAddr">—</div>
+      </div>
+    </div>
+    <div class="ota-sub">
+      Flash via Arduino IDE: <b>Sketch → Upload Method → OTA</b> (set IP above, port 3232).<br>
+      Or: <code style="color:#60a5fa">python3 espota.py -i &lt;IP&gt; -p 3232 -f firmware.bin</code>
+    </div>
+  </div>
+
+  <div class="row2">
+    <div class="field">
+      <label>OTA Password (min 4)</label>
+      <input type="password" id="otaPassInput" placeholder="arswebui" maxlength="32">
+    </div>
+    <div style="display:flex;align-items:flex-end;padding-bottom:11px">
+      <button class="btn btn-grey" onclick="saveOTAPass()" style="width:100%">
+        SAVE OTA PASS
+      </button>
+    </div>
+  </div>
+  <div class="hint">Default OTA password: <b>arswebui</b> — change here. Reboot to apply.</div>
+</div>
+
+<!-- ══ SYSTEM STATUS ══════════════════════════════════════════════════════════ -->
 <div class="card">
   <div class="card-h"><span class="dot g"></span>System Status</div>
   <div id="sysInfo"><div class="loading">Loading...</div></div>
 </div>
 
-<!-- EVENT LOG -->
+<!-- ══ EVENT LOG ══════════════════════════════════════════════════════════════ -->
 <div class="card">
   <div class="card-h">
     <span class="dot g"></span>Event Log
@@ -418,52 +461,21 @@ tr:hover td{background:#141925}
   <div class="log-box" id="logBox">Waiting for events...</div>
 </div>
 
-<div class="foot">ArsWebUI v2.8 &nbsp;|&nbsp; ESP32-S3 N16R8 &nbsp;|&nbsp; AsyncTCP + ESPAsyncWebServer</div>
+<div class="foot">ArsWebUI v2.8 &nbsp;|&nbsp; ESP32-S3 N16R8 &nbsp;|&nbsp; AsyncTCP + ArduinoOTA</div>
 </div>
 
 <script>
 'use strict';
 
-var statusMon = null;
-var curInten  = 1;
-var mrOn      = true;
+var statusMon    = null;
+var curInten     = 1;
+var mrOn         = true;
+var autoScanInt  = null;
+var autoClientInt = null;
 
-// ── Antenna tip dismiss ───────────────────────────────────────────────────────
-function dismissTip() {
-  var el = document.getElementById('antTip');
-  if (el) el.style.display = 'none';
-}
-
-// ── Fetch with timeout + button guard ────────────────────────────────────────
-// fetchT(url, ms): returns a Promise that rejects after ms milliseconds.
-// Wraps AbortController so hung requests on a busy ESP don't block the UI.
-function fetchT(url, ms) {
-  ms = ms || 8000;
-  var ctrl = new AbortController();
-  var tid  = setTimeout(function(){ ctrl.abort(); }, ms);
-  return fetch(url, {signal: ctrl.signal})
-    .finally(function(){ clearTimeout(tid); });
-}
-
-// btnGuard(btn, fn): disables btn, calls fn() which must return a Promise,
-// re-enables btn when the Promise settles (resolve or reject).
-// Prevents double-fire and gives visual feedback during slow ESP responses.
-function btnGuard(btn, fn) {
-  if (!btn) { fn(); return; }
-  var orig = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = '...';
-  var p = fn();
-  if (p && typeof p.finally === 'function') {
-    p.finally(function() {
-      btn.disabled = false;
-      btn.textContent = orig;
-    });
-  } else {
-    btn.disabled = false;
-    btn.textContent = orig;
-  }
-  return p;
+// ── Banner dismiss ────────────────────────────────────────────────────────────
+function dismissBanner() {
+  document.getElementById('antBanner').style.display = 'none';
 }
 
 // ── Intensity ─────────────────────────────────────────────────────────────────
@@ -474,14 +486,14 @@ function setInten(v) {
     var bv = parseInt(b.getAttribute('data-v'));
     b.className = 'ib' + (bv === v ? ' ' + intenCls[v] : '');
   });
-  fetchT('/set?inten=' + v, 4000).catch(function(){});
+  fetch('/set?inten=' + v).catch(function(){});
 }
 
 function setMacRand(v) {
   mrOn = !!v;
   document.getElementById('mrOn').style.background  = v ? '#0f2d50' : '#151b28';
   document.getElementById('mrOff').style.background = v ? '#151b28' : '#2d0808';
-  fetchT('/set?mac_rand=' + v, 4000).catch(function(){});
+  fetch('/set?mac_rand=' + v).catch(function(){});
 }
 setMacRand(1);
 
@@ -507,42 +519,68 @@ function setBadge(type) {
 
 function setType(t) { document.getElementById('typeLabel').textContent = t || ''; }
 
+// ── Auto-refresh: WiFi scan ───────────────────────────────────────────────────
+function toggleAutoScan() {
+  var btn = document.getElementById('autoScanBtn');
+  if (autoScanInt) {
+    clearInterval(autoScanInt);
+    autoScanInt = null;
+    btn.textContent = 'OFF';
+    btn.className   = 'btn-auto';
+  } else {
+    scanWiFi();
+    autoScanInt = setInterval(scanWiFi, 15000);
+    btn.textContent = 'ON 15s';
+    btn.className   = 'btn-auto on';
+  }
+}
+
+// ── Auto-refresh: passive clients ─────────────────────────────────────────────
+function toggleAutoClient() {
+  var btn = document.getElementById('autoClientBtn');
+  if (autoClientInt) {
+    clearInterval(autoClientInt);
+    autoClientInt = null;
+    btn.textContent = 'OFF';
+    btn.className   = 'btn-auto';
+  } else {
+    refreshClients();
+    autoClientInt = setInterval(refreshClients, 5000);
+    btn.textContent = 'ON 5s';
+    btn.className   = 'btn-auto on';
+  }
+}
+
 // ── Scan ──────────────────────────────────────────────────────────────────────
-function scanWiFi(btn) {
+function scanWiFi() {
   document.getElementById('scanArea').innerHTML =
     '<div class="loading">Scanning... (~5s)</div>';
-  return btnGuard(btn, function() {
-    return fetchT('/scan', 15000)
-      .then(function(r){ return r.text(); })
-      .then(function(d){
-        document.getElementById('scanArea').innerHTML =
-          '<table><thead><tr><th>#</th><th>SSID</th><th>BSSID</th>' +
-          '<th>CH</th><th>RSSI</th><th>SEC</th><th>ACTION</th></tr></thead>' +
-          '<tbody>' + d + '</tbody></table>';
-      }).catch(function(e){
-        document.getElementById('scanArea').innerHTML =
-          '<div class="loading" style="color:#ef4444">Scan failed' +
-          (e.name==='AbortError' ? ' (timeout — ESP busy)' : '') + '</div>';
-      });
+  fetch('/scan').then(function(r){return r.text();}).then(function(d){
+    document.getElementById('scanArea').innerHTML =
+      '<table><thead><tr><th>#</th><th>SSID</th><th>BSSID</th>' +
+      '<th>CH</th><th>RSSI</th><th>SEC</th><th>ACTION</th></tr></thead>' +
+      '<tbody>' + d + '</tbody></table>';
+  }).catch(function(){
+    document.getElementById('scanArea').innerHTML =
+      '<div class="loading" style="color:#ef4444">Scan failed</div>';
   });
 }
 
-function scanClients(btn) {
+function scanClients() {
   var a = document.getElementById('clientArea');
   a.style.display = 'block';
-  a.innerHTML = '<div class="loading">Fetching passive client table...</div>';
-  return btnGuard(btn, function() {
-    return fetchT('/scan_clients', 8000)
-      .then(function(r){ return r.text(); })
-      .then(function(d){
-        a.innerHTML =
-          '<table><thead><tr><th>MAC</th><th>RSSI</th><th>CH</th>' +
-          '<th>LAST SEEN</th><th>ACTION</th></tr></thead>' +
-          '<tbody>' + d + '</tbody></table>';
-      }).catch(function(e){
-        a.innerHTML = '<div class="loading" style="color:#ef4444">Failed' +
-          (e.name==='AbortError' ? ' (timeout)' : '') + '</div>';
-      });
+  refreshClients();
+}
+
+function refreshClients() {
+  fetch('/scan_clients').then(function(r){return r.text();}).then(function(d){
+    document.getElementById('clientTable').innerHTML =
+      '<table><thead><tr><th>MAC</th><th>RSSI</th><th>CH</th>' +
+      '<th>LAST SEEN</th><th>ACTION</th></tr></thead>' +
+      '<tbody>' + d + '</tbody></table>';
+  }).catch(function(){
+    document.getElementById('clientTable').innerHTML =
+      '<div class="loading" style="color:#ef4444">Failed</div>';
   });
 }
 
@@ -555,11 +593,11 @@ function selTarget(bssid, ch, ssid) {
 
 function selCSA(bssid, ch, ssid) {
   selTarget(bssid, ch, ssid);
-  setTimeout(function(){ startCSA(null); }, 200);
+  setTimeout(startCSA, 200);
 }
 
 // ── Deauth ────────────────────────────────────────────────────────────────────
-function startDeauth(btn) {
+function startDeauth() {
   var bssid = document.getElementById('bssidInput').value.trim().toUpperCase();
   var ch    = document.getElementById('channelSelect').value;
   var ssid  = document.getElementById('ssidInput').value.trim();
@@ -570,37 +608,27 @@ function startDeauth(btn) {
   if (!confirm('Deauth: ' + (ssid||bssid) + ' [' + bssid + '] CH' + ch +
                '\nClient: ' + (cli||'broadcast (all clients)') + '\n\nContinue?')) return;
 
-  return btnGuard(btn, function() {
-    return fetchT('/deauth?bssid=' + bssid + '&ch=' + ch +
-          '&ssid=' + encodeURIComponent(ssid) +
-          '&client=' + cli + '&inten=' + curInten, 8000)
-      .then(function(r){ return r.text(); })
-      .then(function(d){
-        if (d.indexOf('ERROR') > -1) { alert(d); return; }
-        setBadge('deauth'); setType('→ ' + (ssid||bssid));
-        startStatusMon();
-      }).catch(function(e){
-        alert('Request failed' + (e.name==='AbortError' ? ' (timeout — ESP busy at high intensity)' : ''));
-      });
-  });
+  fetch('/deauth?bssid=' + bssid + '&ch=' + ch +
+        '&ssid=' + encodeURIComponent(ssid) +
+        '&client=' + cli + '&inten=' + curInten)
+    .then(function(r){return r.text();}).then(function(d){
+      if (d.indexOf('ERROR') > -1) { alert(d); return; }
+      setBadge('deauth'); setType('→ ' + (ssid||bssid));
+      startStatusMon();
+    }).catch(function(){ alert('Request failed'); });
 }
 
-function startDeauthAll(btn) {
+function startDeauthAll() {
   if (!confirm('Deauth ALL nearby networks continuously?\n\nContinue?')) return;
-  return btnGuard(btn, function() {
-    return fetchT('/deauth_all?inten=' + curInten, 8000)
-      .then(function(r){ return r.text(); })
-      .then(function(d){
-        if (d.indexOf('ERROR') > -1) { alert(d); return; }
-        setBadge('deauthall'); setType('→ all networks');
-        startStatusMon();
-      }).catch(function(e){
-        alert('Request failed' + (e.name==='AbortError' ? ' (timeout)' : ''));
-      });
-  });
+  fetch('/deauth_all?inten=' + curInten)
+    .then(function(r){return r.text();}).then(function(d){
+      if (d.indexOf('ERROR') > -1) { alert(d); return; }
+      setBadge('deauthall'); setType('→ all networks');
+      startStatusMon();
+    }).catch(function(){ alert('Request failed'); });
 }
 
-function startCSA(btn) {
+function startCSA() {
   var bssid = document.getElementById('bssidInput').value.trim().toUpperCase();
   var ch    = document.getElementById('channelSelect').value;
   var ssid  = document.getElementById('ssidInput').value.trim();
@@ -609,106 +637,103 @@ function startCSA(btn) {
   if (!confirm('CSA attack on ' + (ssid||bssid) + ' CH' + ch +
                '\nForces clients to switch channels.\n\nContinue?')) return;
 
-  return btnGuard(btn, function() {
-    return fetchT('/csa?bssid=' + bssid + '&ch=' + ch +
-          '&ssid=' + encodeURIComponent(ssid), 8000)
-      .then(function(r){ return r.text(); })
-      .then(function(d){
-        if (d.indexOf('ERROR') > -1) { alert(d); return; }
-        setBadge('csa'); setType('→ ' + (ssid||bssid));
-        startStatusMon();
-      }).catch(function(e){
-        alert('Request failed' + (e.name==='AbortError' ? ' (timeout)' : ''));
-      });
-  });
+  fetch('/csa?bssid=' + bssid + '&ch=' + ch +
+        '&ssid=' + encodeURIComponent(ssid))
+    .then(function(r){return r.text();}).then(function(d){
+      if (d.indexOf('ERROR') > -1) { alert(d); return; }
+      setBadge('csa'); setType('→ ' + (ssid||bssid));
+      startStatusMon();
+    }).catch(function(){ alert('Request failed'); });
 }
 
 // ── Beacon spam ───────────────────────────────────────────────────────────────
-function startBeacon(btn) {
+function startBeacon() {
   if (!confirm('Start beacon spam?\nFloods nearby devices with 20 fake SSIDs.\n\nContinue?')) return;
-  return btnGuard(btn, function() {
-    return fetchT('/beacon_spam', 8000)
-      .then(function(r){ return r.text(); })
-      .then(function(d){
-        if (d.indexOf('ERROR') > -1) { alert(d); return; }
-        setBadge('beacon'); setType('→ fake SSIDs');
-        startStatusMon();
-      }).catch(function(e){
-        alert('Request failed' + (e.name==='AbortError' ? ' (timeout)' : ''));
-      });
-  });
+  fetch('/beacon_spam')
+    .then(function(r){return r.text();}).then(function(d){
+      if (d.indexOf('ERROR') > -1) { alert(d); return; }
+      setBadge('beacon'); setType('→ fake SSIDs');
+      startStatusMon();
+    }).catch(function(){ alert('Request failed'); });
 }
 
 // ── Stop ──────────────────────────────────────────────────────────────────────
-function stopAll(btn) {
-  return btnGuard(btn, function() {
-    return fetchT('/stop', 6000)
-      .then(function(r){ return r.text(); })
-      .then(function(){
-        setBadge('idle'); setType('');
-        stopStatusMon();
-      }).catch(function(){
-        // Stop may have worked even if response timed out — refresh status
-        pollStatus();
-      });
+function stopAll() {
+  fetch('/stop').then(function(r){return r.text();}).then(function(){
+    setBadge('idle'); setType('');
+    stopStatusMon();
   });
 }
 
 // ── UDP ───────────────────────────────────────────────────────────────────────
-function startUDP(btn) {
+function startUDP() {
   var ip   = document.getElementById('udpIP').value.trim();
   var port = parseInt(document.getElementById('udpPort').value);
   if (!ip)                       { alert('Enter target IP'); return; }
-  if (port < 1 || port > 65535) { alert('Invalid port (1–65535)'); return; }
+  if (port < 1 || port > 65535) { alert('Invalid port (1-65535)'); return; }
   if (!confirm('UDP flood → ' + ip + ':' + port + '\n\nContinue?')) return;
 
-  return btnGuard(btn, function() {
-    return fetchT('/udp_flood?ip=' + ip + '&port=' + port, 8000)
-      .then(function(r){ return r.text(); })
-      .then(function(d){
-        if (d.indexOf('ERROR') > -1) { alert(d); return; }
-        setBadge('udpflood'); setType('→ ' + ip + ':' + port);
-        startStatusMon();
-      }).catch(function(e){
-        alert('Request failed' + (e.name==='AbortError' ? ' (timeout)' : ''));
-      });
-  });
+  fetch('/udp_flood?ip=' + ip + '&port=' + port)
+    .then(function(r){return r.text();}).then(function(d){
+      if (d.indexOf('ERROR') > -1) { alert(d); return; }
+      setBadge('udpflood'); setType('→ ' + ip + ':' + port);
+      startStatusMon();
+    }).catch(function(){ alert('Request failed'); });
 }
 
 // ── STA config ────────────────────────────────────────────────────────────────
-function saveSTA(btn) {
+function saveSTA() {
   var ss = document.getElementById('staSSID').value.trim();
   var pp = document.getElementById('staPass').value;
   if (!ss) { alert('Enter SSID'); return; }
-  return btnGuard(btn, function() {
-    return fetchT('/savesta?ssid=' + encodeURIComponent(ss) +
-          '&pass=' + encodeURIComponent(pp), 8000)
-      .then(function(r){ return r.text(); })
-      .then(function(d){ alert(d); })
-      .catch(function(){ alert('Request timed out — may have saved, check log'); });
-  });
+  fetch('/savesta?ssid=' + encodeURIComponent(ss) +
+        '&pass=' + encodeURIComponent(pp))
+    .then(function(r){return r.text();}).then(function(d){ alert(d); });
 }
 
 // ── AP config ─────────────────────────────────────────────────────────────────
-function saveAP(btn) {
+function saveAP() {
   var ss = document.getElementById('apSSID').value.trim();
   var pp = document.getElementById('apPass').value;
   if (!ss)           { alert('Enter new SSID'); return; }
   if (pp.length < 8) { alert('Password must be at least 8 characters'); return; }
   if (!confirm('Rename AP to "' + ss + '"?\nYou will need to reconnect.')) return;
-  return btnGuard(btn, function() {
-    return fetchT('/setap?ssid=' + encodeURIComponent(ss) +
-          '&pass=' + encodeURIComponent(pp), 8000)
-      .then(function(r){ return r.text(); })
-      .then(function(d){ alert(d); })
-      .catch(function(){ alert('Request sent — reconnect to new SSID'); });
-  });
+  fetch('/setap?ssid=' + encodeURIComponent(ss) +
+        '&pass=' + encodeURIComponent(pp))
+    .then(function(r){return r.text();}).then(function(d){ alert(d); })
+    .catch(function(){ alert('Request sent — reconnect to new SSID'); });
+}
+
+// ── OTA password ──────────────────────────────────────────────────────────────
+function saveOTAPass() {
+  var p = document.getElementById('otaPassInput').value;
+  if (p.length < 4) { alert('OTA password must be at least 4 characters'); return; }
+  fetch('/setotapass?pass=' + encodeURIComponent(p))
+    .then(function(r){return r.text();}).then(function(d){ alert(d); })
+    .catch(function(){ alert('Request failed'); });
+}
+
+// ── OTA info ──────────────────────────────────────────────────────────────────
+function loadOtaInfo() {
+  fetch('/ota_info').then(function(r){return r.text();}).then(function(d){
+    var parts = d.trim().split(',');
+    var webAddr = parts[0] || '';
+    var otaAddr = parts[1] || '';
+
+    // Header row
+    document.getElementById('liveWebIP').textContent = webAddr;
+    document.getElementById('liveOtaIP').textContent = otaAddr;
+
+    // OTA panel
+    document.getElementById('otaWebAddr').textContent  = webAddr;
+    document.getElementById('otaFlashAddr').textContent = otaAddr;
+  }).catch(function(){});
 }
 
 // ── Status monitor ────────────────────────────────────────────────────────────
 function startStatusMon() {
   if (statusMon) return;
-  statusMon = setInterval(pollStatus, 3500);   // v2.8: 3500ms (was 2500ms)
+  statusMon = setInterval(pollStatus, 2500);
 }
 
 function stopStatusMon() {
@@ -716,56 +741,50 @@ function stopStatusMon() {
 }
 
 function pollStatus() {
-  fetchT('/attack_status', 5000)
-    .then(function(r){ return r.text(); })
-    .then(function(d){
-      var p = d.split(',');
-      var running = p[0] === '1';
-      var type    = p[1] || 'idle';
-      var pkts    = p[2] || '0';
-      document.getElementById('liveCount').textContent = pkts;
-      if (!running) { setBadge('idle'); setType(''); stopStatusMon(); }
-      else          { setBadge(type); }
-    }).catch(function(){});  // silent — ESP may be TX-busy
+  fetch('/attack_status').then(function(r){return r.text();}).then(function(d){
+    var p = d.split(',');
+    var running = p[0] === '1';
+    var type    = p[1] || 'idle';
+    var pkts    = p[2] || '0';
+    document.getElementById('liveCount').textContent = pkts;
+    if (!running) { setBadge('idle'); setType(''); stopStatusMon(); }
+    else          { setBadge(type); }
+  }).catch(function(){});
 }
 
 // ── Packet counter (always running) ──────────────────────────────────────────
 function pollPkts() {
-  fetchT('/pkt_count', 4000)
-    .then(function(r){ return r.text(); })
-    .then(function(d){
-      document.getElementById('liveCount').textContent = d.trim();
-    }).catch(function(){});
+  fetch('/pkt_count').then(function(r){return r.text();}).then(function(d){
+    document.getElementById('liveCount').textContent = d.trim();
+  }).catch(function(){});
 }
 
 // ── Sysinfo ───────────────────────────────────────────────────────────────────
 function loadSysInfo() {
-  fetchT('/sysinfo', 6000)
-    .then(function(r){ return r.text(); })
-    .then(function(d){
-      document.getElementById('sysInfo').innerHTML = d;
-      var vs = document.querySelectorAll('#sysInfo .stat-v');
-      if (vs.length >= 2) document.getElementById('liveHeap').textContent = vs[1].textContent;
-    }).catch(function(){});
+  fetch('/sysinfo').then(function(r){return r.text();}).then(function(d){
+    document.getElementById('sysInfo').innerHTML = d;
+    var vs = document.querySelectorAll('#sysInfo .stat-v');
+    if (vs.length >= 2) document.getElementById('liveHeap').textContent = vs[1].textContent;
+  }).catch(function(){});
 }
 
 // ── Event log ─────────────────────────────────────────────────────────────────
 function loadLog() {
-  fetchT('/log', 5000)
-    .then(function(r){ return r.text(); })
-    .then(function(d){
-      var box = document.getElementById('logBox');
-      box.textContent = d || '(empty)';
-      box.scrollTop   = box.scrollHeight;
-    }).catch(function(){});
+  fetch('/log').then(function(r){return r.text();}).then(function(d){
+    var box = document.getElementById('logBox');
+    box.textContent = d || '(empty)';
+    box.scrollTop   = box.scrollHeight;
+  }).catch(function(){});
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 loadSysInfo();
 loadLog();
-setInterval(loadSysInfo, 8000);    // v2.8: 8000ms (was 6000ms)
-setInterval(pollPkts,    2000);
-setInterval(loadLog,    12000);
+loadOtaInfo();
+setInterval(loadSysInfo,  6000);
+setInterval(pollPkts,     2000);
+setInterval(loadLog,     12000);
+setInterval(loadOtaInfo, 10000);
 </script>
 </body>
 </html>

@@ -27,9 +27,6 @@ jobs:
             --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
       # ── 4. Patch libnet80211.a ───────────────────────────────────────────────
-      # Weakens ieee80211_raw_frame_sanity_check from GLOBAL → WEAK so the
-      # stub in ArsWebUI.ino wins at link time, letting raw deauth/disassoc
-      # frames reach the radio.
       - name: Patch libnet80211.a
         run: |
           TOOLCHAIN=$(find ~/.arduino15/packages/esp32/tools/esp-x32 \
@@ -48,17 +45,13 @@ jobs:
         run: |
           LIBDIR="$HOME/Arduino/libraries"
           mkdir -p "$LIBDIR"
-          # AsyncTCP + ESPAsyncWebServer: ESP32Async forks support core 3.x
           git clone --depth 1 https://github.com/ESP32Async/AsyncTCP.git \
             "$LIBDIR/AsyncTCP"
           git clone --depth 1 https://github.com/ESP32Async/ESPAsyncWebServer.git \
             "$LIBDIR/ESPAsyncWebServer"
-          # Adafruit NeoPixel via Library Manager
           arduino-cli lib install "Adafruit NeoPixel"
 
       # ── 6. Prepare sketch folder ─────────────────────────────────────────────
-      # arduino-cli requires the .ino inside a folder matching its name.
-      # web_content.h must live beside the .ino or the #include fails.
       - name: Prepare sketch folder
         run: |
           mkdir -p ArsWebUI
@@ -73,10 +66,37 @@ jobs:
             --output-dir build \
             ArsWebUI
 
-      # ── 8. Upload .bin artifact ──────────────────────────────────────────────
-      - name: Upload firmware
+      # ── 8. Create merged.bin via esptool ─────────────────────────────────────
+      # Produces one file that flashes the full board at 0x0000.
+      # The three separate bins are also kept for ArduinoDroid / manual flashing.
+      - name: Create merged.bin
+        run: |
+          pip install esptool --quiet
+          python -m esptool --chip esp32s3 merge_bin \
+            --output build/ArsWebUI.ino.merged.bin \
+            --flash_mode qio \
+            --flash_size 16MB \
+            0x0000  build/ArsWebUI.ino.bootloader.bin \
+            0x8000  build/ArsWebUI.ino.partitions.bin \
+            0x10000 build/ArsWebUI.ino.bin
+
+      # ── 9. Rename for clarity ────────────────────────────────────────────────
+      - name: Organise artifacts
+        run: |
+          mkdir -p artifacts
+          # Three separate bins (for ArduinoDroid or manual flashing)
+          cp build/ArsWebUI.ino.bootloader.bin artifacts/bootloader_0x0000.bin
+          cp build/ArsWebUI.ino.partitions.bin  artifacts/partitions_0x8000.bin
+          cp build/ArsWebUI.ino.bin             artifacts/firmware_0x10000.bin
+          # One merged bin (flash everything at 0x0000)
+          cp build/ArsWebUI.ino.merged.bin      artifacts/merged_flash_0x0000.bin
+          echo "=== Artifact sizes ==="
+          ls -lh artifacts/
+
+      # ── 10. Upload artifacts ─────────────────────────────────────────────────
+      - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
           name: esp32s3-firmware
-          path: build/
+          path: artifacts/
           retention-days: 30

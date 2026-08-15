@@ -25,10 +25,13 @@ jobs:
 
       - name: Compile ESP32-S3
         run: |
+          mkdir ArsWebUI
+          cp ArsWebUI.ino ArsWebUI/ArsWebUI.ino
+          cp web_content.h ArsWebUI/web_content.h
           arduino-cli compile \
             --fqbn esp32:esp32:esp32s3 \
             --output-dir build \
-            .
+            ArsWebUI
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4

@@ -13,7 +13,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. arduino-cli (official action handles PATH correctly) ───────────────
+      # ── 2. Arduino CLI ───────────────────────────────────────────────────────
       - name: Setup Arduino CLI
         uses: arduino/setup-arduino-cli@v2
 
@@ -27,6 +27,9 @@ jobs:
             --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
       # ── 4. Patch libnet80211.a ───────────────────────────────────────────────
+      # Weakens ieee80211_raw_frame_sanity_check from GLOBAL → WEAK so the
+      # stub in ArsWebUI.ino wins at link time, letting raw deauth/disassoc
+      # frames reach the radio.
       - name: Patch libnet80211.a
         run: |
           TOOLCHAIN=$(find ~/.arduino15/packages/esp32/tools/esp-x32 \
@@ -66,30 +69,49 @@ jobs:
             --output-dir build \
             ArsWebUI
 
-      # ── 8. Create merged.bin via esptool ─────────────────────────────────────
-      # Produces one file that flashes the full board at 0x0000.
-      # The three separate bins are also kept for ArduinoDroid / manual flashing.
-      - name: Create merged.bin
+      # ── 8. Merge all three bins into one via esptool ─────────────────────────
+      # merged_0x0000.bin: flash everything in one shot at address 0x0000.
+      # Ideal for web flashers (ESP Web Tool) and esptool one-liners.
+      # The three separate bins are preserved for ArduinoDroid / manual flash.
+      - name: Create merged bin
         run: |
           pip install esptool --quiet
           python -m esptool --chip esp32s3 merge_bin \
-            --output build/ArsWebUI.ino.merged.bin \
+            --output build/merged.bin \
             --flash_mode qio \
             --flash_size 16MB \
             0x0000  build/ArsWebUI.ino.bootloader.bin \
             0x8000  build/ArsWebUI.ino.partitions.bin \
             0x10000 build/ArsWebUI.ino.bin
 
-      # ── 9. Rename for clarity ────────────────────────────────────────────────
+      # ── 9. Organise artifacts ────────────────────────────────────────────────
+      # Layout inside the downloaded zip:
+      #
+      #   OPTION A — Single file (web flasher / esptool):
+      #     merged_0x0000.bin          ← flash at 0x0000, covers everything
+      #
+      #   OPTION B — Three files (ArduinoDroid / manual esptool):
+      #     bootloader_0x0000.bin      ← flash at 0x0000
+      #     partitions_0x8000.bin      ← flash at 0x8000
+      #     firmware_0x10000.bin       ← flash at 0x10000
+      #
+      # esptool one-liner for Option B:
+      #   esptool.py --chip esp32s3 --baud 921600 write_flash \
+      #     0x0000 bootloader_0x0000.bin \
+      #     0x8000 partitions_0x8000.bin \
+      #     0x10000 firmware_0x10000.bin
       - name: Organise artifacts
         run: |
           mkdir -p artifacts
-          # Three separate bins (for ArduinoDroid or manual flashing)
-          cp build/ArsWebUI.ino.bootloader.bin artifacts/bootloader_0x0000.bin
+
+          # ── Option A: merged ─────────────────────────────────────────────────
+          cp build/merged.bin  artifacts/merged_0x0000.bin
+
+          # ── Option B: separate ───────────────────────────────────────────────
+          cp build/ArsWebUI.ino.bootloader.bin  artifacts/bootloader_0x0000.bin
           cp build/ArsWebUI.ino.partitions.bin  artifacts/partitions_0x8000.bin
           cp build/ArsWebUI.ino.bin             artifacts/firmware_0x10000.bin
-          # One merged bin (flash everything at 0x0000)
-          cp build/ArsWebUI.ino.merged.bin      artifacts/merged_flash_0x0000.bin
+
           echo "=== Artifact sizes ==="
           ls -lh artifacts/
 

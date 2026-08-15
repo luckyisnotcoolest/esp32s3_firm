@@ -1,0 +1,99 @@
+name: Build ESP32-S3 Firmware
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. arduino-cli via official action (PATH wired correctly) ────────────
+      - name: Setup Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      # ── 3. Install ESP32 Arduino core 3.3.5 ──────────────────────────────────
+      - name: Install ESP32 core
+        run: |
+          arduino-cli config init
+          arduino-cli core update-index \
+            --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32@3.3.5 \
+            --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+
+      # ── 4. Patch libnet80211.a ───────────────────────────────────────────────
+      # Weakens ieee80211_raw_frame_sanity_check GLOBAL → WEAK so the stub in
+      # ArsWebUI.ino wins at link time and raw deauth/disassoc frames reach radio.
+      - name: Patch libnet80211.a
+        run: |
+          TOOLCHAIN=$(find ~/.arduino15/packages/esp32/tools/esp-x32 \
+            -name "xtensa-esp32s3-elf-objcopy" | head -1)
+          LIBNET=$(find ~/.arduino15/packages/esp32 \
+            -name "libnet80211.a" -path "*/esp32s3/*" | head -1)
+          echo "Toolchain : $TOOLCHAIN"
+          echo "Library   : $LIBNET"
+          "$TOOLCHAIN" \
+            --weaken-symbol=ieee80211_raw_frame_sanity_check \
+            "$LIBNET" "$LIBNET"
+          echo "Patch OK."
+
+      # ── 5. Install 3rd-party libraries ───────────────────────────────────────
+      - name: Install libraries
+        run: |
+          LIBDIR="$HOME/Arduino/libraries"
+          mkdir -p "$LIBDIR"
+          git clone --depth 1 https://github.com/ESP32Async/AsyncTCP.git \
+            "$LIBDIR/AsyncTCP"
+          git clone --depth 1 https://github.com/ESP32Async/ESPAsyncWebServer.git \
+            "$LIBDIR/ESPAsyncWebServer"
+          arduino-cli lib install "Adafruit NeoPixel"
+
+      # ── 6. Prepare sketch folder ─────────────────────────────────────────────
+      - name: Prepare sketch folder
+        run: |
+          mkdir -p ArsWebUI
+          cp ArsWebUI.ino  ArsWebUI/
+          cp web_content.h ArsWebUI/
+
+      # ── 7. Compile ───────────────────────────────────────────────────────────
+      - name: Compile ESP32-S3
+        run: |
+          arduino-cli compile \
+            --fqbn "esp32:esp32:esp32s3:EraseFlash=none,PartitionScheme=huge_app,ZigbeeMode=default,LoopCore=1,CDCOnBoot=default,DFUOnBoot=default,JTAGAdapter=default,CPUFreq=240,PSRAM=opi,UploadMode=default,EventsCore=1,MSCOnBoot=default,USBMode=hwcdc,FlashMode=qio,FlashSize=16M,DebugLevel=none,UploadSpeed=921600" \
+            --output-dir build \
+            ArsWebUI
+
+      # ── 8. Create merged.bin (full 16MB flash image at 0x0000) ───────────────
+      - name: Create merged.bin
+        run: |
+          pip install esptool --quiet
+          python -m esptool --chip esp32s3 merge_bin \
+            --output build/ArsWebUI.ino.merged.bin \
+            --flash_mode qio \
+            --flash_size 16MB \
+            0x0000  build/ArsWebUI.ino.bootloader.bin \
+            0x8000  build/ArsWebUI.ino.partitions.bin \
+            0x10000 build/ArsWebUI.ino.bin
+
+      # ── 9. Remove standalone .bin (merged.bin covers everything) ─────────────
+      - name: Remove standalone app bin
+        run: rm -f build/ArsWebUI.ino.bin
+
+      # ── 10. Upload artifacts ─────────────────────────────────────────────────
+      # Produces exactly:
+      #   ArsWebUI.ino.bootloader.bin   — flash at 0x0000 (manual)
+      #   ArsWebUI.ino.partitions.bin   — flash at 0x8000 (manual)
+      #   ArsWebUI.ino.merged.bin       — flash at 0x0000 (full image, ESPFlash)
+      #   ArsWebUI.ino.elf              — debug symbols
+      #   ArsWebUI.ino.map              — linker map
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32s3-firmware
+          path: build/
+          retention-days: 30

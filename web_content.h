@@ -1,10 +1,10 @@
 #pragma once
 #include <Arduino.h>
 
-// ArsWebUI — Dark UI
-// Endpoints used: /scan /scan_clients /deauth /deauth_all /csa /beacon_spam
-//   /stop /stopdeauth /udp_flood /savesta /setap /pkt_count /attack_status
-//   /log /sysinfo /set
+// ArsWebUI v2.8 — Dark UI
+// Endpoints: /scan /scan_clients /deauth /deauth_all /deauth_all_ch /csa
+//   /beacon_spam /stop /stopdeauth /udp_flood /savesta /setap /pkt_count
+//   /attack_status /log /sysinfo /set
 
 const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
@@ -174,7 +174,7 @@ tr:hover td{background:#141925}
 <div class="card">
   <div class="card-h"><span class="dot"></span>Network Scanner</div>
   <div class="ctrls">
-    <button class="btn btn-blue" onclick="scanWiFi()" title="Stop any active attack before scanning">SCAN NETWORKS</button>
+    <button class="btn btn-blue" onclick="scanWiFi()">SCAN NETWORKS</button>
     <button class="btn btn-blue" onclick="scanClients()">PASSIVE CLIENTS</button>
   </div>
   <div id="scanArea"><div class="loading">Tap SCAN to discover networks</div></div>
@@ -257,15 +257,15 @@ tr:hover td{background:#141925}
     </div>
   </div>
 
-  <div class="info" style="margin-bottom:10px">
-    <b>DEAUTH TARGET</b> — single AP on its channel (AP_CHANNEL constraint applies).<br>
-    <b>DEAUTH ALL CH1-13</b> — sweeps every channel, bursts all found APs + broadcast deauth. Uses PSRAM AP map, no heap fragmentation.
-  </div>
   <div class="ctrls">
     <button class="btn btn-red"  onclick="startDeauth()">DEAUTH TARGET</button>
-    <button class="btn btn-red"  onclick="startDeauthAll()" title="Sweeps ch1-13, deauths all APs on every channel">DEAUTH ALL CH1-13</button>
+    <button class="btn btn-red"  onclick="startDeauthAll()">DEAUTH ALL</button>
+    <button class="btn btn-red"  onclick="startDeauthAllCh()" style="background:#7f1d1d;border:1px solid #ef4444">DEAUTH CH1-13 ⚡</button>
     <button class="btn btn-pur"  onclick="startCSA()">CSA ATTACK</button>
     <button class="btn btn-stop" onclick="stopAll()">■ STOP ALL</button>
+  </div>
+  <div class="hint" style="margin-top:8px;color:#7f1d1d">
+    ⚠ CH1-13 mode briefly stops the AP per channel hop (~300ms). UI auto-reconnects.
   </div>
 </div>
 
@@ -275,7 +275,6 @@ tr:hover td{background:#141925}
   <div class="info">
     Floods the air with 20 fake SSIDs on rotating channels.
     Saturates nearby device scanner lists with ghost networks.
-    Uses PSRAM buffer for zero heap impact during attack.
   </div>
   <div class="ctrls">
     <button class="btn btn-pur"  onclick="startBeacon()">START BEACON SPAM</button>
@@ -389,12 +388,13 @@ setMacRand(1);
 
 // ── Badge helpers ─────────────────────────────────────────────────────────────
 var badgeMap = {
-  idle:      ['IDLE',          'b-off'],
-  deauth:    ['DEAUTH ACTIVE', 'b-on'],
-  deauthall: ['DEAUTH ALL',    'b-on'],
-  udpflood:  ['UDP FLOOD',     'b-udp'],
-  beacon:    ['BEACON SPAM',   'b-bcn'],
-  csa:       ['CSA ATTACK',    'b-csa']
+  idle:        ['IDLE',             'b-off'],
+  deauth:      ['DEAUTH ACTIVE',    'b-on'],
+  deauthall:   ['DEAUTH ALL',       'b-on'],
+  deauthallch: ['DEAUTH CH1-13',    'b-on'],
+  udpflood:    ['UDP FLOOD',        'b-udp'],
+  beacon:      ['BEACON SPAM',      'b-bcn'],
+  csa:         ['CSA ATTACK',       'b-csa']
 };
 
 function setBadge(type) {
@@ -473,13 +473,24 @@ function startDeauth() {
 }
 
 function startDeauthAll() {
-  if (!confirm('Deauth ALL nearby networks continuously?\n\nContinue?')) return;
+  if (!confirm('Deauth ALL nearby networks on AP channel continuously?\n\nControl UI stays connected.\n\nContinue?')) return;
   fetch('/deauth_all?inten=' + curInten)
     .then(function(r){return r.text();}).then(function(d){
       if (d.indexOf('ERROR') > -1) { alert(d); return; }
-      setBadge('deauthall'); setType('→ all networks');
+      setBadge('deauthall'); setType('→ all networks (AP channel)');
       startStatusMon();
     }).catch(function(){ alert('Request failed'); });
+}
+
+function startDeauthAllCh() {
+  if (!confirm('Deauth ALL networks on CH 1-13?\n\n⚠ The control AP will briefly flicker (~300ms per channel).\nThe UI will auto-reconnect.\n\nContinue?')) return;
+  fetch('/deauth_all_ch?inten=' + curInten)
+    .then(function(r){return r.text();}).then(function(d){
+      if (d.indexOf('ERROR') > -1) { alert(d); return; }
+      setBadge('deauthallch'); setType('→ ch1-13 sweep (PSRAM cached)');
+      startStatusMon();
+      startAutoReconnect();  // handles AP flicker during channel hops
+    }).catch(function(){ alert('Request failed — board may be hopping channels'); });
 }
 
 function startCSA() {
@@ -603,6 +614,29 @@ function loadLog() {
     box.textContent = d || '(empty)';
     box.scrollTop   = box.scrollHeight;
   }).catch(function(){});
+}
+
+// ── Auto-reconnect (for CH1-13 hop mode — AP flickers briefly per channel) ───
+var reconnectTimer = null;
+function startAutoReconnect() {
+  if (reconnectTimer) return;
+  reconnectTimer = setInterval(function() {
+    fetch('/attack_status', {signal: AbortSignal.timeout(1500)})
+      .then(function(r){ return r.text(); })
+      .then(function(d){
+        var p = d.split(',');
+        if (p[0] === '0') {
+          stopAutoReconnect();
+          setBadge('idle'); setType(''); stopStatusMon();
+        }
+      })
+      .catch(function() {
+        // AP momentarily down during channel hop — silently retry
+      });
+  }, 1800);
+}
+function stopAutoReconnect() {
+  if (reconnectTimer) { clearInterval(reconnectTimer); reconnectTimer = null; }
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────

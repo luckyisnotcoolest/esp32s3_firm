@@ -1,10 +1,10 @@
 #pragma once
 #include <Arduino.h>
 
-// ArsWebUI v2.8 — Dark UI
-// Endpoints: /scan /scan_clients /deauth /deauth_all /csa /beacon_spam
-//   /stop /stopdeauth /udp_flood /savesta /setap /pkt_count /attack_status
-//   /log /sysinfo /set /ota_info /setotapass
+// ArsWebUI v2.9 — Dark UI
+// Endpoints: /scan /scan_clients /deauth /deauth_all /deauth_all_ch /csa
+//   /beacon_spam /stop /stopdeauth /udp_flood /savesta /setap /pkt_count
+//   /attack_status /log /sysinfo /set /ota_info /setotapass
 
 const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
@@ -25,19 +25,28 @@ body{background:var(--bg);color:var(--text);
      font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh}
 .wrap{max-width:900px;margin:0 auto;padding:12px}
 
-/* ── Antenna banner ── */
-.ant-banner{
-  background:linear-gradient(135deg,#0a1628,#1a0a28);
-  border:1px solid #3b82f6;border-radius:10px;
-  padding:10px 14px;margin-bottom:10px;font-size:11px;
-  color:#93c5fd;display:flex;align-items:flex-start;
-  justify-content:space-between;gap:10px;line-height:1.7}
-.ant-banner strong{color:#60a5fa;font-size:12px;display:block;margin-bottom:2px}
-.ant-banner .ant-x{
-  background:none;border:1px solid #2a3a5a;border-radius:5px;
-  color:#4b5675;cursor:pointer;font-size:12px;padding:1px 7px;
-  flex-shrink:0;margin-top:2px;transition:all .15s}
-.ant-banner .ant-x:hover{border-color:#60a5fa;color:#93c5fd}
+/* ── Hardware recommendations ── */
+.hw-rec{
+  background:linear-gradient(135deg,#050f05,#0a1a0a);
+  border:1px solid #22c55e;border-radius:10px;
+  padding:12px 14px;margin-bottom:10px;font-size:11px;
+  color:#86efac;line-height:1.8}
+.hw-rec strong{color:#4ade80;font-size:12px;display:block;
+               margin-bottom:6px;letter-spacing:1px}
+.hw-rec .hw-dismiss{
+  float:right;background:none;border:1px solid #166534;
+  border-radius:5px;color:#4b5675;cursor:pointer;
+  font-size:11px;padding:1px 8px;transition:all .15s}
+.hw-rec .hw-dismiss:hover{border-color:#22c55e;color:#4ade80}
+.hw-rec ul{padding-left:14px;margin:0}
+.hw-rec li{margin-bottom:2px}
+.hw-rec .hw-tag{
+  display:inline-block;background:#052e1a;border:1px solid #166534;
+  border-radius:4px;padding:0 6px;font-size:9px;
+  color:#4ade80;font-weight:700;margin-left:4px;vertical-align:middle}
+
+/* ── Antenna banner (legacy, kept for compatibility) ── */
+.ant-banner{display:none}
 
 /* ── Header ── */
 .hdr{background:linear-gradient(135deg,#080b14,#141033);
@@ -195,23 +204,34 @@ tr:hover td{background:#141925}
 <body>
 <div class="wrap">
 
-<!-- ══ ANTENNA RECOMMENDATION BANNER (dismissable) ═══════════════════════════ -->
-<div class="ant-banner" id="antBanner">
-  <div>
-    <strong>📡 Range Tip — iPEX → SMA Adapter + High-Gain Antenna</strong>
-    For maximum deauth effectiveness: connect an <b>iPEX (u.FL) → SMA adapter</b>
-    to the ESP32-S3's antenna port and attach a <b>5–9 dBi high-gain omni antenna</b>
-    or a <b>14 dBi directional panel</b>. Works bare-S3 at 19.5 dBm — external antenna
-    dramatically extends range. Long-range model recommended:
-    <span style="color:#60a5fa">TP-Link TL-ANT2409CL</span> or similar 2.4 GHz SMA antenna.
-  </div>
-  <button class="ant-x" onclick="dismissBanner()">✕</button>
+<!-- ══ HARDWARE RECOMMENDATIONS ══════════════════════════════════════════════ -->
+<div class="hw-rec" id="hwRec">
+  <button class="hw-dismiss" onclick="document.getElementById('hwRec').style.display='none'">✕</button>
+  <strong>🛠 Hardware Setup — Bare ESP32-S3 N16R8 Range Optimization</strong>
+  <ul>
+    <li><b>External Antenna</b> — Connect U.FL/IPEX to SMA adapter on the ESP32-S3 antenna pad.
+        Attach a <b>5 dBi 2.4GHz omni</b> (budget) or <b>9 dBi panel</b> (directional).
+        Recommended: <span style="color:#4ade80">TP-Link TL-ANT2409CL</span> or any 2.4GHz SMA antenna.
+        <span class="hw-tag">+6dBm effective</span></li>
+    <li><b>Power Supply</b> — Use a quality 5V ≥1A adapter. At MAX TX (19.5 dBm) the radio
+        draws ~350mA. A weak charger causes brownouts → resets. USB power bank works fine.</li>
+    <li><b>Placement</b> — Elevation = range. Every 1m above obstacles adds ~3dBm effective.
+        Avoid metal enclosures — they kill range by 10-20dB. Use plastic or acrylic case.</li>
+    <li><b>Heat</b> — At MAX intensity for extended periods the S3 runs warm (~55°C).
+        Add a small heatsink to the module if running MAX for >10 minutes.</li>
+    <li><b>Channel</b> — Your AP runs on CH6. For best deauth effectiveness on a target,
+        use <b>DEAUTH CH1-13</b> mode which physically hops channels. For a single target
+        on CH6, standard deauth is most powerful (no AP interruption).</li>
+    <li><b>Antenna connector</b> — Most ESP32-S3 N16R8 boards have a U.FL (IPEX1) connector
+        near the module edge. Some have it populated, some need the ceramic antenna trace cut
+        first. Check your board silkscreen for "ANT" or "RF".</li>
+  </ul>
 </div>
 
 <!-- ══ HEADER ════════════════════════════════════════════════════════════════ -->
 <div class="hdr">
   <h1>ArsWebUI</h1>
-  <div class="hdr-sub">ESP32-S3 N16R8 &nbsp;▸&nbsp; 19.5 dBm &nbsp;▸&nbsp; v2.8</div>
+  <div class="hdr-sub">ESP32-S3 N16R8 &nbsp;▸&nbsp; 19.5 dBm &nbsp;▸&nbsp; v2.9</div>
   <div class="live-row">
     <span>PKTS&nbsp;<b id="liveCount">0</b></span>
     <span>STATUS&nbsp;<b id="liveStatus">IDLE</b></span>
@@ -324,9 +344,16 @@ tr:hover td{background:#141925}
 
   <div class="ctrls">
     <button class="btn btn-red"  onclick="startDeauth()">DEAUTH TARGET</button>
-    <button class="btn btn-red"  onclick="startDeauthAll()">DEAUTH ALL</button>
+    <button class="btn btn-red"  onclick="startDeauthAll()">DEAUTH ALL AP-CH</button>
+    <button class="btn btn-red"  onclick="startDeauthAllCh()"
+            style="background:#7f1d1d;border:1px solid #ef4444">
+      DEAUTH CH1-13 ⚡
+    </button>
     <button class="btn btn-pur"  onclick="startCSA()">CSA ATTACK</button>
     <button class="btn btn-stop" onclick="stopAll()">■ STOP ALL</button>
+  </div>
+  <div class="hint">
+    ⚡ CH1-13 briefly stops control AP per channel (~300ms). UI auto-reconnects.
   </div>
 </div>
 
@@ -461,7 +488,7 @@ tr:hover td{background:#141925}
   <div class="log-box" id="logBox">Waiting for events...</div>
 </div>
 
-<div class="foot">ArsWebUI v2.8 &nbsp;|&nbsp; ESP32-S3 N16R8 &nbsp;|&nbsp; AsyncTCP + ArduinoOTA</div>
+<div class="foot">ArsWebUI v2.9 &nbsp;|&nbsp; ESP32-S3 N16R8 &nbsp;|&nbsp; AsyncTCP + ArduinoOTA</div>
 </div>
 
 <script>
@@ -499,12 +526,13 @@ setMacRand(1);
 
 // ── Badge helpers ─────────────────────────────────────────────────────────────
 var badgeMap = {
-  idle:      ['IDLE',          'b-off'],
-  deauth:    ['DEAUTH ACTIVE', 'b-on'],
-  deauthall: ['DEAUTH ALL',    'b-on'],
-  udpflood:  ['UDP FLOOD',     'b-udp'],
-  beacon:    ['BEACON SPAM',   'b-bcn'],
-  csa:       ['CSA ATTACK',    'b-csa']
+  idle:        ['IDLE',          'b-off'],
+  deauth:      ['DEAUTH ACTIVE', 'b-on'],
+  deauthall:   ['DEAUTH ALL',    'b-on'],
+  deauthallch: ['DEAUTH CH1-13', 'b-on'],
+  udpflood:    ['UDP FLOOD',     'b-udp'],
+  beacon:      ['BEACON SPAM',   'b-bcn'],
+  csa:         ['CSA ATTACK',    'b-csa']
 };
 
 function setBadge(type) {
@@ -619,13 +647,52 @@ function startDeauth() {
 }
 
 function startDeauthAll() {
-  if (!confirm('Deauth ALL nearby networks continuously?\n\nContinue?')) return;
+  if (!confirm('Deauth ALL nearby networks — AP stays up, best-effort on non-AP channels.\n\nContinue?')) return;
   fetch('/deauth_all?inten=' + curInten)
     .then(function(r){return r.text();}).then(function(d){
       if (d.indexOf('ERROR') > -1) { alert(d); return; }
-      setBadge('deauthall'); setType('→ all networks');
+      setBadge('deauthall'); setType('→ all networks (AP up)');
       startStatusMon();
     }).catch(function(){ alert('Request failed'); });
+}
+
+function startDeauthAllCh() {
+  if (!confirm('Deauth ALL networks CH 1-13?\n\n⚠ Control AP stops briefly per channel hop (~300ms each).\nThe UI auto-reconnects automatically.\n\nContinue?')) return;
+  fetch('/deauth_all_ch?inten=' + curInten)
+    .then(function(r){return r.text();}).then(function(d){
+      if (d.indexOf('ERROR') > -1) { alert(d); return; }
+      setBadge('deauthallch'); setType('→ ch1-13 PSRAM sweep');
+      startStatusMon();
+      startAutoReconnect();
+    }).catch(function(){
+      // AP may be mid-hop — just start reconnect
+      setBadge('deauthallch'); setType('→ ch1-13 PSRAM sweep');
+      startAutoReconnect();
+    });
+}
+
+// ── Auto-reconnect for CH1-13 mode (AP flickers per channel hop) ─────────────
+var reconnectTimer = null;
+function startAutoReconnect() {
+  if (reconnectTimer) return;
+  reconnectTimer = setInterval(function() {
+    fetch('/attack_status', {signal: AbortSignal.timeout(1500)})
+      .then(function(r){ return r.text(); })
+      .then(function(d){
+        var p = d.split(',');
+        if (p[0] === '0') {
+          stopAutoReconnect();
+          setBadge('idle'); setType(''); stopStatusMon();
+        } else {
+          setBadge(p[1] || 'deauthallch');
+          document.getElementById('liveCount').textContent = p[2] || '0';
+        }
+      })
+      .catch(function() { /* AP mid-hop, retry next tick */ });
+  }, 1800);
+}
+function stopAutoReconnect() {
+  if (reconnectTimer) { clearInterval(reconnectTimer); reconnectTimer = null; }
 }
 
 function startCSA() {

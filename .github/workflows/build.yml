@@ -1,4 +1,4 @@
-name: Build ESP32-S3 Firmware
+name: Build ArsWebUI v3.0 ESP32-S3 (objcopy + Apple Juice)
 
 on:
   push:

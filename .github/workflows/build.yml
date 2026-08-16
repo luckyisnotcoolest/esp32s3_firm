@@ -1,11 +1,10 @@
-name: Build ArsWebUI v3.0 ESP32-S3 (objcopy + Apple Juice)
+name: Build ArsWebUI v3.0 ESP32-S3 (objcopy)
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  # ── Job 1: objcopy weaken (worked on your last run) ─────────────────────────
   build-objcopy:
     name: Build (objcopy patch)
     runs-on: ubuntu-latest
@@ -27,7 +26,6 @@ jobs:
         run: |
           set -e
           OBJCOPY=$(find ~/.arduino15/packages/esp32 -type f -name "xtensa-esp32s3-elf-objcopy" | head -1)
-          # Arduino-ESP32 3.x stores prebuilt libs here:
           LIBNET=$(find ~/.arduino15/packages/esp32/tools/esp32-arduino-libs \
             -path "*/esp32s3/lib/libnet80211.a" | head -1)
           echo "objcopy = $OBJCOPY"
@@ -36,6 +34,8 @@ jobs:
           cp "$LIBNET" "$LIBNET.bak"
           "$OBJCOPY" --weaken-symbol=ieee80211_raw_frame_sanity_check "$LIBNET" "$LIBNET"
           echo "weaken OK"
+          # verify symbol is now weak
+          nm "$LIBNET" 2>/dev/null | grep -i ieee80211_raw_frame_sanity || true
 
       - name: Install libraries
         run: |
@@ -60,76 +60,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: firmware-objcopy
-          path: build/
-          retention-days: 30
-
-  # ── Job 2: pre-patched lib from repo (only if libs/esp32s3/libnet80211.a exists)
-  build-prepatched:
-    name: Build (Pre-patched libnet)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Arduino CLI
-        uses: arduino/setup-arduino-cli@v2
-
-      - name: Install ESP32 core 3.3.5
-        run: |
-          arduino-cli config init
-          arduino-cli core update-index \
-            --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
-          arduino-cli core install esp32:esp32@3.3.5 \
-            --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
-
-      - name: Inject pre-patched libnet80211.a
-        run: |
-          set -e
-          test -f libs/esp32s3/libnet80211.a
-          LIBNET=$(find ~/.arduino15/packages/esp32/tools/esp32-arduino-libs \
-            -path "*/esp32s3/lib/libnet80211.a" | head -1)
-          echo "Target libnet = $LIBNET"
-          test -n "$LIBNET"
-          cp "$LIBNET" "$LIBNET.bak"
-          cp libs/esp32s3/libnet80211.a "$LIBNET"
-          ls -la "$LIBNET"
-
-      - name: Install libraries
-        run: |
-          LIBDIR="$HOME/Arduino/libraries"
-          mkdir -p "$LIBDIR"
-          git clone --depth 1 https://github.com/ESP32Async/AsyncTCP.git "$LIBDIR/AsyncTCP"
-          git clone --depth 1 https://github.com/ESP32Async/ESPAsyncWebServer.git "$LIBDIR/ESPAsyncWebServer"
-          arduino-cli lib install "Adafruit NeoPixel"
-
-      - name: Prepare sketch (no strong stub for prepatched)
-        run: |
-          mkdir -p ArsWebUI
-          # Strip strong sanity stub so it doesn't fight the binary-patched lib
-          python3 - <<'PY'
-          from pathlib import Path
-          src = Path("ArsWebUI.ino").read_text()
-          import re
-          src2 = re.sub(
-              r'extern\s+"C"\s+int\s+ieee80211_raw_frame_sanity_check\s*\([^)]*\)\s*\{[^}]*\}',
-              '/* sanity stub removed for pre-patched libnet */',
-              src,
-              count=1,
-              flags=re.S,
-          )
-          Path("ArsWebUI/ArsWebUI.ino").write_text(src2)
-          Path("ArsWebUI/web_content.h").write_text(Path("web_content.h").read_text())
-          print("stub stripped:", src2 != src)
-          PY
-
-      - name: Compile
-        run: |
-          arduino-cli compile -v \
-            --fqbn "esp32:esp32:esp32s3:PartitionScheme=huge_app,CPUFreq=240,PSRAM=opi,FlashSize=16M,DebugLevel=none,UploadSpeed=921600,CDCOnBoot=default,USBMode=hwcdc" \
-            --output-dir build \
-            ArsWebUI
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: firmware-prepatched
           path: build/
           retention-days: 30

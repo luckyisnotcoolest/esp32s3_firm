@@ -13,7 +13,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. arduino-cli (official action handles PATH correctly) ───────────────
+      # ── 2. arduino-cli via official action (PATH always correct) ─────────────
       - name: Setup Arduino CLI
         uses: arduino/setup-arduino-cli@v2
 
@@ -26,39 +26,72 @@ jobs:
           arduino-cli core install esp32:esp32@3.3.5 \
             --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
-      # ── 4. Patch libnet80211.a ───────────────────────────────────────────────
-      # Weakens ieee80211_raw_frame_sanity_check from GLOBAL → WEAK so the
-      # stub in ArsWebUI.ino wins at link time, letting raw deauth/disassoc
-      # frames reach the radio.
+      # ── 4. Patch + VERIFY libnet80211.a ─────────────────────────────────────
+      # Weakens ieee80211_raw_frame_sanity_check GLOBAL→WEAK so the stub in
+      # ArsWebUI.ino wins at link time. Raw deauth/disassoc frames reach radio.
+      #
+      # VERIFICATION: if patch fails, symbol stays GLOBAL and deauth is silent.
+      # This step now checks the binding after patching and FAILS the build if
+      # the symbol is still GLOBAL — catches a broken toolchain path early.
       - name: Patch libnet80211.a
         run: |
-          TOOLCHAIN=$(find ~/.arduino15/packages/esp32/tools/esp-x32 \
+          OBJCOPY=$(find ~/.arduino15/packages/esp32/tools/esp-x32 \
             -name "xtensa-esp32s3-elf-objcopy" | head -1)
+          OBJDUMP=$(find ~/.arduino15/packages/esp32/tools/esp-x32 \
+            -name "xtensa-esp32s3-elf-objdump" | head -1)
           LIBNET=$(find ~/.arduino15/packages/esp32 \
             -name "libnet80211.a" -path "*/esp32s3/*" | head -1)
-          echo "Toolchain : $TOOLCHAIN"
-          echo "Library   : $LIBNET"
-          "$TOOLCHAIN" \
+
+          echo "objcopy : $OBJCOPY"
+          echo "objdump : $OBJDUMP"
+          echo "libnet  : $LIBNET"
+
+          if [ -z "$OBJCOPY" ]; then
+            echo "ERROR: xtensa-esp32s3-elf-objcopy not found"
+            exit 1
+          fi
+          if [ -z "$LIBNET" ]; then
+            echo "ERROR: libnet80211.a not found under esp32s3/"
+            exit 1
+          fi
+
+          # Apply patch
+          "$OBJCOPY" \
             --weaken-symbol=ieee80211_raw_frame_sanity_check \
             "$LIBNET" "$LIBNET"
-          echo "Patch applied."
+          echo "objcopy returned $?"
+
+          # Verify: symbol must now show as weak (lowercase 'w' in nm output)
+          NM=$(find ~/.arduino15/packages/esp32/tools/esp-x32 \
+            -name "xtensa-esp32s3-elf-nm" | head -1)
+          if [ -n "$NM" ]; then
+            SYM=$("$NM" "$LIBNET" 2>/dev/null | \
+              grep "ieee80211_raw_frame_sanity_check" | head -1)
+            echo "Symbol after patch: $SYM"
+            # nm shows 'W' or 'w' for weak, 'T' or 't' for strong text
+            if echo "$SYM" | grep -qE '[Tt] ieee80211_raw_frame_sanity_check'; then
+              echo "ERROR: patch did NOT weaken symbol — still GLOBAL. Check objcopy version."
+              exit 1
+            fi
+            echo "Patch VERIFIED — symbol is weak."
+          else
+            echo "nm not found — skipping verification (patch assumed OK)"
+          fi
 
       # ── 5. Install 3rd-party libraries ───────────────────────────────────────
       - name: Install libraries
         run: |
           LIBDIR="$HOME/Arduino/libraries"
           mkdir -p "$LIBDIR"
-          # AsyncTCP + ESPAsyncWebServer: ESP32Async forks support core 3.x
+          # ESP32Async forks — support Arduino ESP32 core 3.x
           git clone --depth 1 https://github.com/ESP32Async/AsyncTCP.git \
             "$LIBDIR/AsyncTCP"
           git clone --depth 1 https://github.com/ESP32Async/ESPAsyncWebServer.git \
             "$LIBDIR/ESPAsyncWebServer"
-          # Adafruit NeoPixel via Library Manager
+          # Adafruit NeoPixel
           arduino-cli lib install "Adafruit NeoPixel"
 
       # ── 6. Prepare sketch folder ─────────────────────────────────────────────
-      # arduino-cli requires the .ino inside a folder matching its name.
-      # web_content.h must live beside the .ino or the #include fails.
       - name: Prepare sketch folder
         run: |
           mkdir -p ArsWebUI
@@ -73,8 +106,16 @@ jobs:
             --output-dir build \
             ArsWebUI
 
-      # ── 8. Upload .bin artifact ──────────────────────────────────────────────
-      - name: Upload firmware
+      # ── 8. Upload artifacts ──────────────────────────────────────────────────
+      # arduino-cli + ESP32 core 3.x auto-produces merged.bin alongside the
+      # other outputs. No manual esptool step needed.
+      # Artifact contains:
+      #   ArsWebUI.ino.bootloader.bin  — 0x0000 (manual flash)
+      #   ArsWebUI.ino.partitions.bin  — 0x8000 (manual flash)
+      #   ArsWebUI.ino.merged.bin      — 0x0000 (full image, ESPFlash app)
+      #   ArsWebUI.ino.elf             — debug symbols
+      #   ArsWebUI.ino.map             — linker map
+      - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
           name: esp32s3-firmware

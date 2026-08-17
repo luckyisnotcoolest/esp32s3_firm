@@ -90,6 +90,8 @@ jobs:
             "$LIBDIR/ESPAsyncWebServer"
           # Adafruit NeoPixel
           arduino-cli lib install "Adafruit NeoPixel"
+          # ArduinoJson — required by ArsWebUI
+          arduino-cli lib install "ArduinoJson"
 
       # ── 6. Prepare sketch folder ─────────────────────────────────────────────
       - name: Prepare sketch folder
